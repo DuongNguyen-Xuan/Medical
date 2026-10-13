@@ -11,30 +11,20 @@ from decimal import Decimal
 import psycopg
 from psycopg import sql
 from psycopg.types.json import Json, Jsonb
-from flask import Flask, Response, jsonify, redirect, render_template_string, request
+from flask import Flask, Response, jsonify, render_template_string, request
 
 
 app = Flask(__name__)
 
-RAW_DATABASE_ENDPOINTS = {
-    "list_tables",
-    "list_columns",
-    "get_table_info",
-    "get_row",
-    "insert_row",
-    "update_row",
-    "delete_row",
-    "table_data",
-    "powerbi_data",
-    "export_csv",
-}
-
-
-@app.before_request
-def block_unscoped_database_browser():
-    if request.endpoint in RAW_DATABASE_ENDPOINTS:
-        return jsonify({"error": "Trình duyệt dữ liệu thô đã bị khóa; hãy dùng dashboard y tế."}), 403
-    return None
+SENSITIVE_TABLE_PATTERN = re.compile(
+    r"(medical|health|student|parent|guardian|user|profile|teacher|vaccin|examin|bhy[t]?|tuition.*student)",
+    re.IGNORECASE,
+)
+SENSITIVE_COLUMN_PATTERN = (
+    r"(phone|email|address|symptom|diagnostic|disease|medical|health|contact|"
+    r"student|parent|guardian|user_id|birth|cccd|allerg|treatment|medicine|"
+    r"vaccin|insurance|bmi|full_name)"
+)
 
 
 @app.after_request
@@ -96,6 +86,19 @@ def table_exists(conn, schema, table):
     return row[0]
 
 
+def is_sensitive_table(conn, schema, table):
+    if SENSITIVE_TABLE_PATTERN.search(table):
+        return True
+    row = conn.execute(
+        """SELECT EXISTS (
+               SELECT 1 FROM information_schema.columns
+               WHERE table_schema = %s AND table_name = %s AND column_name ~* %s
+           )""",
+        (schema, table, SENSITIVE_COLUMN_PATTERN),
+    ).fetchone()
+    return row[0]
+
+
 @app.get("/api/tables")
 def list_tables():
     search = request.args.get("q", "").strip()
@@ -115,6 +118,20 @@ def list_tables():
                    ORDER BY n.nspname, c.relname""",
                 (pattern, pattern, pattern),
             ).fetchall()
+            protected = {
+                (row[0], row[1]) for row in conn.execute(
+                    """SELECT DISTINCT table_schema, table_name
+                       FROM information_schema.columns
+                       WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+                         AND column_name ~* %s""",
+                    (SENSITIVE_COLUMN_PATTERN,),
+                ).fetchall()
+            }
+            rows = [
+                row for row in rows
+                if (row[0], row[1]) not in protected
+                and not SENSITIVE_TABLE_PATTERN.search(row[1])
+            ]
         return jsonify([
             {"schema": r[0], "table": r[1], "kind": r[2], "estimated_rows": r[3]}
             for r in rows
@@ -130,6 +147,8 @@ def list_columns():
         return error
     try:
         with connect_db() as conn:
+            if is_sensitive_table(conn, schema, table):
+                return jsonify({"error": "Bảng chứa dữ liệu cá nhân hoặc y tế và không khả dụng trong trình duyệt chung."}), 403
             rows = conn.execute(
                 """SELECT column_name, data_type, is_nullable
                    FROM information_schema.columns
@@ -146,6 +165,8 @@ def list_columns():
 
 def table_info(conn, schema, table):
     if schema in ("pg_catalog", "information_schema") or schema.startswith("pg_"):
+        return None
+    if is_sensitive_table(conn, schema, table):
         return None
     relation = conn.execute(
         """SELECT c.oid, c.relkind FROM pg_class c
@@ -364,6 +385,8 @@ def delete_row():
 
 def fetch_rows(schema, table, limit, offset):
     with connect_db() as conn:
+        if is_sensitive_table(conn, schema, table):
+            return None, None
         if not table_exists(conn, schema, table):
             return None, None
         query = sql.SQL("SELECT * FROM {}.{} LIMIT %s OFFSET %s").format(
@@ -981,7 +1004,7 @@ button.table:hover,button.table.active{background:#eff6ff;color:#1d4ed8}small{co
 dialog{width:min(760px,94vw);max-height:90vh;border:0;border-radius:10px;padding:0;box-shadow:0 16px 60px #0f172a55}dialog::backdrop{background:#0f172a88}.dialog-head,.dialog-foot{padding:16px 20px;background:#f8fafc;display:flex;justify-content:space-between;align-items:center}.dialog-head h3{margin:0}.dialog-body{padding:18px 20px;max-height:65vh;overflow:auto}.field{display:grid;grid-template-columns:minmax(150px,1fr) 2fr;gap:12px;align-items:center;margin-bottom:10px}.field label{font-weight:600}.field input,.field textarea{margin:0}.field textarea{min-height:70px;padding:9px;border:1px solid #cbd5e1;border-radius:6px;font:inherit}.dialog-foot button{padding:9px 14px;border:0;border-radius:6px;cursor:pointer}.dialog-foot .save{background:#2563eb;color:white}.notice{margin:12px 0;color:#b91c1c}
 @media(max-width:800px){main{grid-template-columns:1fr}.sidebar{max-height:40vh}}
 </style></head><body>
-<header><h1>K12 Staging · Table Browser</h1><p>Danh mục và xem trước dữ liệu PostgreSQL · Power BI có thể lấy CSV qua liên kết xuất dữ liệu</p></header>
+<header><h1>K12 Staging · Table Browser</h1><p>Danh mục và xem trước dữ liệu PostgreSQL · Power BI có thể lấy CSV qua liên kết xuất dữ liệu</p><a href="/dashboard" style="display:inline-block;margin-top:12px;padding:9px 13px;background:#16a34a;color:white;border-radius:6px;text-decoration:none;font-weight:600">Phân hệ Y tế</a></header>
 <main><section class="sidebar"><h2>Danh sách bảng</h2><input id="search" placeholder="Tìm schema hoặc tên bảng..."><div id="tables">Đang tải...</div></section>
 <section class="content"><div class="bar"><div><h2 id="heading">Chọn một bảng</h2><div class="muted" id="subheading">Bản xem trước tối đa 100 dòng</div></div><div class="actions"><button id="addRow" hidden>+ Thêm dòng</button><a id="csv" href="#" hidden>Xuất CSV / Power BI</a></div></div><div class="columns" id="columns" hidden></div><div class="scroll" id="preview"><div id="status">Chọn bảng ở danh sách bên trái.</div></div></section></main>
 <dialog id="editor"><form id="editorForm"><div class="dialog-head"><h3 id="dialogTitle">Bản ghi</h3><button type="button" id="closeDialog">Đóng</button></div><div class="dialog-body"><div id="formFields"></div><div class="notice" id="formError"></div></div><div class="dialog-foot"><span class="muted">Để trống trường tùy chọn để lưu NULL.</span><button class="save" type="submit">Lưu</button></div></form></dialog>
@@ -1000,7 +1023,7 @@ search.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(loadTa
 
 @app.get("/")
 def home():
-    return redirect("/dashboard")
+    return PAGE
 
 
 MEDICAL_ROLES = [
@@ -1220,6 +1243,7 @@ h2{margin:9px 0;font-size:18px}p{line-height:1.55}.desc{color:#475569;font-size:
 .report-filters{display:flex;gap:10px;align-items:end;flex-wrap:wrap;padding:12px;background:#f8fafc;border-radius:8px}.report-filters label{font-size:13px;font-weight:600;color:#475569}.report-filters input,.report-filters select{display:block;margin-top:5px;padding:9px 10px;min-width:160px;border:1px solid #cbd5e1;border-radius:7px;font:inherit;background:#fff}.report-filters button{padding:10px 15px;border:0;border-radius:6px;background:#15803d;color:#fff;cursor:pointer}.report-filters button:disabled{opacity:.55}
 .report-status{display:none;margin:12px 0;padding:11px;background:#fff7ed;color:#9a3412;border-radius:7px}.report-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0}.report-metric{padding:13px;background:#f8fafc;border-radius:8px}.report-metric span{display:block;color:#64748b;font-size:12px}.report-metric strong{display:block;margin-top:6px;font-size:20px}
 .report-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.report-panel{min-width:0;padding:14px;border:1px solid #e2e8f0;border-radius:9px}.report-panel h3{margin:0;font-size:15px}.report-panel svg{display:block;width:100%;height:auto;min-height:205px}.report-legend{display:flex;gap:8px 14px;flex-wrap:wrap;margin-top:6px;color:#475569;font-size:12px}.report-legend span{display:inline-flex;align-items:center;gap:5px}.report-legend i{width:10px;height:10px;border-radius:2px}
+.chart-detail{min-height:18px;margin:8px 0 0;color:#475569;font-size:12px}.chart-point,.chart-segment,.chart-bar{cursor:pointer}.chart-point:focus,.chart-segment:focus,.chart-bar:focus{outline:2px solid #1d4ed8;outline-offset:3px}
 footer{max-width:1240px;margin:auto;padding:20px;color:#64748b;font-size:12px;line-height:1.5}
 @media(max-width:900px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:900px){.report-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
@@ -1241,9 +1265,9 @@ footer{max-width:1240px;margin:auto;padding:20px;color:#64748b;font-size:12px;li
   <div class="report-metric"><span>Có kết luận BMI</span><strong id="examBmiConclusions">—</strong></div>
  </div>
  <div class="report-grid">
-  <article class="report-panel"><h3>Lượt khám theo tháng · biểu đồ đường</h3><div id="examMonthlyChart"></div></article>
-  <article class="report-panel"><h3>Phân bố kết luận BMI · biểu đồ vành khuyên</h3><div id="examBmiChart"></div><div id="examBmiLegend" class="report-legend"></div></article>
-  <article class="report-panel"><h3>Phân loại huyết áp và nhịp tim · biểu đồ thanh</h3><div id="examVitalsChart"></div><div id="examVitalsLegend" class="report-legend"></div></article>
+  <article class="report-panel"><h3>Lượt khám theo tháng</h3><div id="examMonthlyChart"></div><p id="examMonthlyDetail" class="chart-detail" aria-live="polite">Di chuột qua điểm để xem số liệu; bấm điểm để lọc tháng.</p></article>
+  <article class="report-panel"><h3>Phân bố kết luận BMI</h3><div id="examBmiChart"></div><div id="examBmiLegend" class="report-legend"></div><p id="examBmiDetail" class="chart-detail" aria-live="polite">Di chuột hoặc bấm vào một phân loại để xem số liệu.</p></article>
+  <article class="report-panel"><h3>Phân loại huyết áp và nhịp tim</h3><div id="examVitalsChart"></div><div id="examVitalsLegend" class="report-legend"></div><p id="examVitalsDetail" class="chart-detail" aria-live="polite">Di chuột hoặc bấm vào một nhóm để xem số liệu.</p></article>
  </div>
 </section>
 <section class="cards" aria-label="Chọn đối tượng dashboard y tế">
@@ -1259,19 +1283,19 @@ function renderMonthlyExams(rows){
  for(let i=0;i<=3;i++){const y=top+plotHeight*i/3;svg.append(reportElement("line",{x1:left,x2:width-right,y1:y,y2:y,stroke:"#e2e8f0"}));const tick=reportElement("text",{x:left-7,y:y+4,"text-anchor":"end",fill:"#64748b","font-size":"10"});tick.textContent=reportNumber.format(Math.round(max*(3-i)/3));svg.append(tick)}
  const points=rows.map((row,index)=>({x:left+(rows.length===1?plotWidth/2:index*step),y:top+plotHeight-(Number(row.total)||0)/max*plotHeight,month:String(row.period).slice(0,7),value:Number(row.total)||0}));
  const line=reportElement("path",{d:points.map((point,index)=>`${index?"L":"M"}${point.x},${point.y}`).join(" "),fill:"none",stroke:"#0f766e","stroke-width":"3"});svg.append(line);
- points.forEach((point,index)=>{svg.append(reportElement("circle",{cx:point.x,cy:point.y,r:4,fill:"#0f766e"}));if(index%Math.max(1,Math.ceil(points.length/8))===0||index===points.length-1){const label=reportElement("text",{x:point.x,y:height-12,"text-anchor":"middle",fill:"#475569","font-size":"10"});label.textContent=point.month;svg.append(label)}});
+ points.forEach((point,index)=>{const circle=reportElement("circle",{cx:point.x,cy:point.y,r:5,fill:"#0f766e",class:"chart-point",tabindex:"0",role:"button","aria-label":`${point.month}: ${reportNumber.format(point.value)} lượt khám`}),title=reportElement("title");title.textContent=`${point.month}: ${reportNumber.format(point.value)} lượt khám`;circle.append(title);const selectMonth=()=>{const [year,month]=point.month.split("-").map(Number),lastDay=new Date(year,month,0).getDate();document.getElementById("examFrom").value=`${point.month}-01`;document.getElementById("examTo").value=`${point.month}-${String(lastDay).padStart(2,"0")}`;document.getElementById("examMonthlyDetail").textContent=`${point.month}: ${reportNumber.format(point.value)} lượt khám. Đang lọc theo tháng này.`;loadGeneralExamReport()};circle.addEventListener("click",selectMonth);circle.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();selectMonth()}});svg.append(circle);if(index%Math.max(1,Math.ceil(points.length/8))===0||index===points.length-1){const label=reportElement("text",{x:point.x,y:height-12,"text-anchor":"middle",fill:"#475569","font-size":"10"});label.textContent=point.month;svg.append(label)}});
  target.append(svg)
 }
 function renderBmiDistribution(rows){
  const target=clearReport("examBmiChart"),legend=clearReport("examBmiLegend");if(!rows.length){target.textContent="Chưa có kết luận BMI trong khoảng lọc.";return}
  const colors=["#16a34a","#f59e0b","#dc2626","#2563eb","#94a3b8"],total=rows.reduce((sum,row)=>sum+Number(row.total),0),svg=reportElement("svg",{viewBox:"0 0 260 210",role:"img","aria-label":"Phân bố kết luận BMI"}),cx=130,cy=100,radius=68,circumference=2*Math.PI*radius;let offset=0;
- rows.forEach((row,index)=>{const amount=Number(row.total)||0,fraction=total?amount/total:0,circle=reportElement("circle",{cx,cy,r:radius,fill:"none",stroke:colors[index%colors.length],"stroke-width":"27","stroke-dasharray":`${fraction*circumference} ${circumference}`,"stroke-dashoffset":-offset,transform:`rotate(-90 ${cx} ${cy})`});circle.append(reportElement("title"));circle.firstChild.textContent=`${row.category}: ${reportNumber.format(amount)}`;svg.append(circle);offset+=fraction*circumference;const item=document.createElement("span"),swatch=document.createElement("i");swatch.style.background=colors[index%colors.length];item.append(swatch,document.createTextNode(`${row.category}: ${reportNumber.format(amount)}`));legend.append(item)});
+ rows.forEach((row,index)=>{const amount=Number(row.total)||0,fraction=total?amount/total:0,circle=reportElement("circle",{cx,cy,r:radius,fill:"none",stroke:colors[index%colors.length],"stroke-width":"27","stroke-dasharray":`${fraction*circumference} ${circumference}`,"stroke-dashoffset":-offset,transform:`rotate(-90 ${cx} ${cy})`,class:"chart-segment",tabindex:"0",role:"button","aria-label":`${row.category}: ${reportNumber.format(amount)}`});circle.append(reportElement("title"));circle.firstChild.textContent=`${row.category}: ${reportNumber.format(amount)}`;const showBmi=()=>{document.getElementById("examBmiDetail").textContent=`${row.category}: ${reportNumber.format(amount)} kết luận.`};circle.addEventListener("click",showBmi);circle.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();showBmi()}});svg.append(circle);offset+=fraction*circumference;const item=document.createElement("span"),swatch=document.createElement("i");swatch.style.background=colors[index%colors.length];item.append(swatch,document.createTextNode(`${row.category}: ${reportNumber.format(amount)}`));legend.append(item)});
  const center=reportElement("text",{x:cx,y:cy+5,"text-anchor":"middle",fill:"#172033","font-size":"19","font-weight":"700"});center.textContent=reportNumber.format(total);svg.append(center);target.append(svg)
 }
 function renderVitalDistribution(rows){
  const target=clearReport("examVitalsChart"),legend=clearReport("examVitalsLegend");if(!rows.length){target.textContent="Chưa có phân loại huyết áp hoặc nhịp tim.";return}
  const categories=[...new Set(rows.map(row=>row.category))],metrics=[...new Set(rows.map(row=>row.metric))],colors={"Bình thường":"#16a34a","Ổn định":"#2563eb","Cao":"#dc2626","Thấp":"#f59e0b","Khác / chưa phân loại":"#94a3b8"},width=640,left=120,right=18,top=22,rowHeight=62,max=Math.max(1,...metrics.map(metric=>rows.filter(row=>row.metric===metric).reduce((sum,row)=>sum+Number(row.total),0))),plotWidth=width-left-right,svg=reportElement("svg",{viewBox:`0 0 ${width} ${top+metrics.length*rowHeight}`,role:"img","aria-label":"Phân loại huyết áp và nhịp tim"});
- metrics.forEach((metric,index)=>{const y=top+index*rowHeight,label=reportElement("text",{x:left-10,y:y+20,"text-anchor":"end",fill:"#334155","font-size":"12"});label.textContent=metric;svg.append(label);let x=left;rows.filter(row=>row.metric===metric).forEach(row=>{const value=Number(row.total)||0,barWidth=value/max*plotWidth,rect=reportElement("rect",{x,y,width:barWidth,height:27,rx:3,fill:colors[row.category]||"#94a3b8"});const title=reportElement("title");title.textContent=`${metric} · ${row.category}: ${reportNumber.format(value)}`;rect.append(title);svg.append(rect);if(barWidth>33){const count=reportElement("text",{x:x+barWidth/2,y:y+18,"text-anchor":"middle",fill:"#fff","font-size":"10"});count.textContent=reportNumber.format(value);svg.append(count)}x+=barWidth})});
+ metrics.forEach((metric,index)=>{const y=top+index*rowHeight,label=reportElement("text",{x:left-10,y:y+20,"text-anchor":"end",fill:"#334155","font-size":"12"});label.textContent=metric;svg.append(label);let x=left;rows.filter(row=>row.metric===metric).forEach(row=>{const value=Number(row.total)||0,barWidth=value/max*plotWidth,rect=reportElement("rect",{x,y,width:barWidth,height:27,rx:3,fill:colors[row.category]||"#94a3b8",class:"chart-bar",tabindex:"0",role:"button","aria-label":`${metric}, ${row.category}: ${reportNumber.format(value)}`});const title=reportElement("title");title.textContent=`${metric} · ${row.category}: ${reportNumber.format(value)}`;rect.append(title);const showVital=()=>{document.getElementById("examVitalsDetail").textContent=`${metric} · ${row.category}: ${reportNumber.format(value)} kết quả.`};rect.addEventListener("click",showVital);rect.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();showVital()}});svg.append(rect);if(barWidth>33){const count=reportElement("text",{x:x+barWidth/2,y:y+18,"text-anchor":"middle",fill:"#fff","font-size":"10","pointer-events":"none"});count.textContent=reportNumber.format(value);svg.append(count)}x+=barWidth})});
  categories.forEach(category=>{const item=document.createElement("span"),swatch=document.createElement("i");swatch.style.background=colors[category]||"#94a3b8";item.append(swatch,document.createTextNode(category));legend.append(item)});target.append(svg)
 }
 function renderGeneralExamReport(data){

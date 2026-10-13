@@ -17,9 +17,9 @@ $env:PGDATABASE = "K12_Staging_Local_Restore"
 python app.py
 ```
 
-Mở trang chủ báo cáo khám tổng quát và chọn đối tượng: <http://127.0.0.1:5000/dashboard>.
+Mở trang trình duyệt dữ liệu tại <http://127.0.0.1:5000/>. Chọn **Phân hệ Y tế** để vào trang chủ báo cáo và chọn dashboard: <http://127.0.0.1:5000/dashboard>.
 
-Trang chủ có bộ lọc ngày/cơ sở, KPI lượt khám, số học sinh đã khám, BMI trung bình và số kết luận BMI; kèm biểu đồ lượt khám theo tháng, phân bố BMI và tình trạng huyết áp/nhịp tim.
+Trang chủ y tế có bộ lọc ngày/cơ sở, KPI lượt khám, số học sinh đã khám, BMI trung bình và số kết luận BMI; kèm biểu đồ tương tác lượt khám theo tháng, phân bố BMI và tình trạng huyết áp/nhịp tim. Di chuột để xem giá trị, bấm vào điểm tháng để lọc báo cáo; bấm vào phân loại BMI hoặc chỉ số sinh tồn để xem số lượng.
 
 ## 11 dashboard theo đối tượng
 
@@ -43,7 +43,7 @@ Trang chủ có bộ lọc ngày/cơ sở, KPI lượt khám, số học sinh đ
 
 Dashboard tổng hợp dữ liệu từ `profile_student` và các bảng `medical_*`. Biểu đồ và bảng tháng là tổng hợp; bảng hồ sơ trả dữ liệu chi tiết theo phạm vi nghiệp vụ của dashboard. Hồ sơ chi tiết mặc định giới hạn thời gian ở ba năm gần nhất, có lọc theo ngày/cơ sở/loại hồ sơ/từ khóa và phân trang.
 
-**Cảnh báo quan trọng:** dữ liệu sức khỏe là dữ liệu nhạy cảm. Chọn dashboard chỉ thay đổi giao diện và loại hồ sơ, không xác thực danh tính hay đảm bảo quyền theo lớp/quan hệ giám hộ; người truy cập cục bộ có thể chọn vai trò khác. Trình duyệt database, API dữ liệu thô, Power BI và xuất CSV đã bị khóa. Flask được cố định bind vào `127.0.0.1`; không đưa cổng này ra mạng, không dùng chung máy với người không được phép và không triển khai thực tế trước khi tích hợp SSO, phân quyền server-side và nhật ký truy cập. Chưa kết nối gửi thông báo phụ huynh hoặc luồng nhập/xuất Excel nghiệp vụ.
+**Cảnh báo quan trọng:** dữ liệu sức khỏe là dữ liệu nhạy cảm. Chọn dashboard chỉ thay đổi giao diện và loại hồ sơ, không xác thực danh tính hay đảm bảo quyền theo lớp/quan hệ giám hộ; người truy cập cục bộ có thể chọn vai trò khác. Trang trình duyệt dữ liệu ở `/` chỉ liệt kê/xem các bảng không nhận diện là dữ liệu cá nhân hoặc y tế; API dữ liệu, Power BI, CRUD và xuất CSV đều chặn các bảng có tên hoặc cột nhận diện nhạy cảm. Đây là biện pháp giảm rủi ro, không thay thế phân quyền server-side. Flask được cố định bind vào `127.0.0.1`; không đưa cổng này ra mạng, không dùng chung máy với người không được phép và không triển khai thực tế trước khi tích hợp SSO, phân quyền server-side và nhật ký truy cập. Chưa kết nối gửi thông báo phụ huynh hoặc luồng nhập/xuất Excel nghiệp vụ.
 
 ## API dashboard
 
