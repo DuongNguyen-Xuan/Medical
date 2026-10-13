@@ -39,7 +39,7 @@ Mỗi trang có mục tiêu nghiệp vụ, bộ chỉ số, bộ lọc cơ sở/
 
 ## Dữ liệu và bảo mật
 
-Dashboard tổng hợp hồ sơ sức khỏe, khám nhanh, khám định kỳ, BHYT, sự kiện tiêm chủng và hồ sơ thuốc từ các bảng `medical_*`. API dashboard chỉ trả số liệu tổng hợp và chuỗi số lượt theo tháng; không trả tên học sinh, triệu chứng, chẩn đoán hoặc thông tin liên hệ. Bảng bên dưới biểu đồ sử dụng cùng bộ lọc và chỉ hiển thị tháng, nhóm nghiệp vụ, số lượt. Một số trường hợp chưa có dữ liệu nguồn (ví dụ bản ghi tiêm chủng) sẽ hiển thị 0; không suy ra tỷ lệ bao phủ nếu chưa có mẫu số học sinh đủ điều kiện.
+Dashboard tổng hợp số hồ sơ học sinh hiện có (theo cơ sở, không phụ thuộc bộ lọc ngày), hồ sơ sức khỏe, khám nhanh, khám định kỳ, BHYT, sự kiện tiêm chủng và hồ sơ thuốc từ các bảng `medical_*`. API dashboard chỉ trả số liệu tổng hợp và chuỗi số lượt theo tháng; không trả tên học sinh, triệu chứng, chẩn đoán hoặc thông tin liên hệ. Bảng bên dưới biểu đồ sử dụng cùng bộ lọc và chỉ hiển thị tháng, nhóm nghiệp vụ, số lượt. Một số trường hợp chưa có dữ liệu nguồn (ví dụ bản ghi tiêm chủng) sẽ hiển thị 0; không suy ra tỷ lệ bao phủ nếu chưa có mẫu số học sinh đủ điều kiện.
 
 Dữ liệu sức khỏe là dữ liệu nhạy cảm. Ứng dụng hiện chưa có xác thực người dùng, phân quyền hoặc nhật ký truy cập; chỉ chạy trên máy cục bộ, không đổi `APP_HOST` sang địa chỉ mạng và không dùng để cung cấp hồ sơ cá nhân. Chưa kết nối gửi thông báo phụ huynh, chưa có cổng phụ huynh/học sinh, và chưa có luồng nhập/xuất Excel nghiệp vụ. Cần hoàn thiện các chức năng này cùng SSO và ma trận quyền trước khi triển khai thực tế.
 

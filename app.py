@@ -413,6 +413,14 @@ def medical_dashboard_data():
                    ORDER BY name, id"""
             ).fetchall()
 
+            student_profiles = conn.execute(
+                """SELECT COUNT(*)
+                   FROM public.profile_student p
+                   WHERE p.deleted_at IS NULL
+                     AND (%s::integer IS NULL OR p.school_id = %s)""",
+                (school_filter, school_filter),
+            ).fetchone()[0]
+
             health = conn.execute(
                 """SELECT COUNT(*), COUNT(DISTINCT user_id),
                           COUNT(*) FILTER (WHERE NULLIF(BTRIM(di_ung), '') IS NOT NULL),
@@ -580,6 +588,7 @@ def medical_dashboard_data():
             },
             "schools": [{"id": row[0], "name": row[1]} for row in schools],
             "metrics": {
+                "student_profiles": student_profiles,
                 "health_profiles": health[0],
                 "students_with_health_profiles": health[1],
                 "allergy_profiles": health[2],
@@ -911,7 +920,7 @@ button{font:inherit}.toolbar button{padding:10px 15px;border:0;border-radius:6px
  </form>
  <div id="status" class="status" role="alert"></div>
  <p class="notice"><b>Lưu ý bảo mật:</b> Trang này chỉ hiển thị số liệu tổng hợp, không trả tên học sinh, triệu chứng, chẩn đoán hoặc thông tin liên hệ. Dữ liệu sức khỏe là dữ liệu nhạy cảm; không dùng số liệu này thay cho tư vấn y tế chuyên môn.</p>
- <section class="cards" aria-label="Chỉ số theo vai trò">{% for metric in role.metrics %}<div class="card"><span>{{ metric[1] }}</span><strong id="{{ metric[0] }}">—</strong></div>{% endfor %}</section>
+ <section class="cards" aria-label="Chỉ số theo vai trò"><div class="card"><span>Hồ sơ học sinh hiện có (tổng hợp)</span><strong id="studentProfiles">—</strong></div>{% for metric in role.metrics %}<div class="card"><span>{{ metric[1] }}</span><strong id="{{ metric[0] }}">—</strong></div>{% endfor %}</section>
  <section class="grid" aria-label="Biểu đồ theo vai trò">{% for chart in role.charts %}<div class="panel chart"><h2>{{ chart.category }} theo tháng</h2><p>Bấm điểm dữ liệu để lọc về tháng tương ứng. Dạng biểu đồ: {{ chart.type }}.</p><div id="chart-{{ loop.index0 }}"></div></div>{% endfor %}
  {% if role.key in ["ban-giam-hieu","truong-bo-phan-y-te","phu-trach-bhyt"] %}<div class="panel"><h2>Tổng hợp BHYT</h2><p id="bhytSummary">Đang tải...</p></div>{% endif %}
  {% if role.key in ["ban-giam-hieu","truong-bo-phan-y-te","cong-tac-hoc-sinh"] %}<div class="panel"><h2>Hồ sơ sức khỏe (tổng hợp)</h2><p id="healthSummary">Đang tải...</p></div>{% endif %}</section>
@@ -946,6 +955,7 @@ function renderSeriesTable(series){
 }
 function renderData(data){
  currentData=data;const values=data.metrics;
+ setMetric("studentProfiles",values.student_profiles);
  metrics.forEach(([id,,key])=>setMetric(id,values[key]));
  const bhyt=document.getElementById("bhytSummary");if(bhyt)bhyt.textContent=`${numberFormat.format(values.bhyt_records)} hồ sơ · ${numberFormat.format(values.bhyt_valid)} học sinh có ngày hết hạn chưa qua · ${numberFormat.format(values.bhyt_expiring_soon)} hồ sơ hết hạn trong 30 ngày tới · ${numberFormat.format(values.bhyt_expired)} hồ sơ đã qua ngày hết hạn.`;
  const health=document.getElementById("healthSummary");if(health)health.textContent=`${numberFormat.format(values.students_with_health_profiles)} học sinh có hồ sơ sức khỏe · ${numberFormat.format(values.allergy_profiles)} hồ sơ có ghi nhận dị ứng · ${numberFormat.format(values.current_condition_profiles)} hồ sơ có ghi nhận bệnh hiện tại.`;
