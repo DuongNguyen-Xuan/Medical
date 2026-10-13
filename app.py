@@ -1255,7 +1255,7 @@ footer{max-width:1240px;margin:auto;padding:20px;color:#64748b;font-size:12px;li
  <h2 id="generalExamTitle">Báo cáo khám tổng quát</h2><p class="report-intro">Tổng hợp hồ sơ khám định kỳ theo ngày khám; phân nhóm BMI, huyết áp và nhịp tim từ kết quả đã ghi nhận.</p>
  <form class="report-filters" id="generalExamFilters">
   <label>Từ ngày<input id="examFrom" type="date"></label><label>Đến ngày<input id="examTo" type="date"></label>
-  <label>Cơ sở<select id="examSchool"><option value="">Tất cả cơ sở</option></select></label><button id="examLoadButton" type="submit">Lọc báo cáo</button>
+  <label>Cơ sở<select id="examSchool"><option value="">Tất cả cơ sở</option></select></label><button id="examLoadButton" type="submit">Lọc báo cáo</button><button id="examResetMonth" type="button" hidden>Quay lại khoảng ngày</button>
  </form>
  <div id="examReportStatus" class="report-status" role="alert"></div>
  <div class="report-metrics" aria-label="Chỉ số khám tổng quát">
@@ -1275,6 +1275,7 @@ footer{max-width:1240px;margin:auto;padding:20px;color:#64748b;font-size:12px;li
 </section></main><footer>Dữ liệu báo cáo khám tổng quát là số liệu tổng hợp. Các dashboard vai trò có thể hiển thị tên và hồ sơ sức khỏe; chọn vai trò không xác thực danh tính. Chỉ chạy cục bộ trên máy tin cậy, không mở ra mạng hoặc Internet.</footer>
 <script>
 const reportApi="/api/medical/dashboard",reportNumber=new Intl.NumberFormat("vi-VN"),reportSvg="http://www.w3.org/2000/svg";
+let examRangeBeforeMonthDrilldown=null;
 function reportElement(name,attrs={}){const node=document.createElementNS(reportSvg,name);Object.entries(attrs).forEach(([key,value])=>node.setAttribute(key,value));return node}
 function clearReport(id){const node=document.getElementById(id);node.replaceChildren();return node}
 function renderMonthlyExams(rows){
@@ -1283,7 +1284,7 @@ function renderMonthlyExams(rows){
  for(let i=0;i<=3;i++){const y=top+plotHeight*i/3;svg.append(reportElement("line",{x1:left,x2:width-right,y1:y,y2:y,stroke:"#e2e8f0"}));const tick=reportElement("text",{x:left-7,y:y+4,"text-anchor":"end",fill:"#64748b","font-size":"10"});tick.textContent=reportNumber.format(Math.round(max*(3-i)/3));svg.append(tick)}
  const points=rows.map((row,index)=>({x:left+(rows.length===1?plotWidth/2:index*step),y:top+plotHeight-(Number(row.total)||0)/max*plotHeight,month:String(row.period).slice(0,7),value:Number(row.total)||0}));
  const line=reportElement("path",{d:points.map((point,index)=>`${index?"L":"M"}${point.x},${point.y}`).join(" "),fill:"none",stroke:"#0f766e","stroke-width":"3"});svg.append(line);
- points.forEach((point,index)=>{const circle=reportElement("circle",{cx:point.x,cy:point.y,r:5,fill:"#0f766e",class:"chart-point",tabindex:"0",role:"button","aria-label":`${point.month}: ${reportNumber.format(point.value)} lượt khám`}),title=reportElement("title");title.textContent=`${point.month}: ${reportNumber.format(point.value)} lượt khám`;circle.append(title);const selectMonth=()=>{const [year,month]=point.month.split("-").map(Number),lastDay=new Date(year,month,0).getDate();document.getElementById("examFrom").value=`${point.month}-01`;document.getElementById("examTo").value=`${point.month}-${String(lastDay).padStart(2,"0")}`;document.getElementById("examMonthlyDetail").textContent=`${point.month}: ${reportNumber.format(point.value)} lượt khám. Đang lọc theo tháng này.`;loadGeneralExamReport()};circle.addEventListener("click",selectMonth);circle.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();selectMonth()}});svg.append(circle);if(index%Math.max(1,Math.ceil(points.length/8))===0||index===points.length-1){const label=reportElement("text",{x:point.x,y:height-12,"text-anchor":"middle",fill:"#475569","font-size":"10"});label.textContent=point.month;svg.append(label)}});
+ points.forEach((point,index)=>{const circle=reportElement("circle",{cx:point.x,cy:point.y,r:5,fill:"#0f766e",class:"chart-point",tabindex:"0",role:"button","aria-label":`${point.month}: ${reportNumber.format(point.value)} lượt khám`}),title=reportElement("title");title.textContent=`${point.month}: ${reportNumber.format(point.value)} lượt khám`;circle.append(title);const selectMonth=()=>{if(!examRangeBeforeMonthDrilldown){examRangeBeforeMonthDrilldown={from:document.getElementById("examFrom").value,to:document.getElementById("examTo").value};document.getElementById("examResetMonth").hidden=false}const [year,month]=point.month.split("-").map(Number),lastDay=new Date(year,month,0).getDate();document.getElementById("examFrom").value=`${point.month}-01`;document.getElementById("examTo").value=`${point.month}-${String(lastDay).padStart(2,"0")}`;document.getElementById("examMonthlyDetail").textContent=`${point.month}: ${reportNumber.format(point.value)} lượt khám. Đang lọc theo tháng này.`;loadGeneralExamReport()};circle.addEventListener("click",selectMonth);circle.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();selectMonth()}});svg.append(circle);if(index%Math.max(1,Math.ceil(points.length/8))===0||index===points.length-1){const label=reportElement("text",{x:point.x,y:height-12,"text-anchor":"middle",fill:"#475569","font-size":"10"});label.textContent=point.month;svg.append(label)}});
  target.append(svg)
 }
 function renderBmiDistribution(rows){
@@ -1308,7 +1309,8 @@ async function loadGeneralExamReport(event){
  catch(error){status.textContent=`Không tải được báo cáo: ${error.message}`;status.style.display="block"}
  finally{button.disabled=false;button.textContent="Lọc báo cáo"}
 }
-document.getElementById("generalExamFilters").addEventListener("submit",loadGeneralExamReport);
+document.getElementById("generalExamFilters").addEventListener("submit",event=>{examRangeBeforeMonthDrilldown=null;document.getElementById("examResetMonth").hidden=true;loadGeneralExamReport(event)});
+document.getElementById("examResetMonth").addEventListener("click",()=>{if(!examRangeBeforeMonthDrilldown)return;document.getElementById("examFrom").value=examRangeBeforeMonthDrilldown.from;document.getElementById("examTo").value=examRangeBeforeMonthDrilldown.to;examRangeBeforeMonthDrilldown=null;document.getElementById("examResetMonth").hidden=true;document.getElementById("examMonthlyDetail").textContent="Di chuột qua điểm để xem số liệu; bấm điểm để lọc tháng.";loadGeneralExamReport()});
 const reportToday=new Date(),reportEnd=`${reportToday.getFullYear()}-${String(reportToday.getMonth()+1).padStart(2,"0")}-${String(reportToday.getDate()).padStart(2,"0")}`,reportStartDate=new Date(reportToday);reportStartDate.setFullYear(reportStartDate.getFullYear()-3);const reportStart=`${reportStartDate.getFullYear()}-${String(reportStartDate.getMonth()+1).padStart(2,"0")}-${String(reportStartDate.getDate()).padStart(2,"0")}`;document.getElementById("examFrom").value=reportStart;document.getElementById("examTo").value=reportEnd;loadGeneralExamReport();
 </script></body></html>"""
 

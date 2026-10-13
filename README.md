@@ -19,7 +19,7 @@ python app.py
 
 Mở trang trình duyệt dữ liệu tại <http://127.0.0.1:5000/>. Chọn **Phân hệ Y tế** để vào trang chủ báo cáo và chọn dashboard: <http://127.0.0.1:5000/dashboard>.
 
-Trang chủ y tế có bộ lọc ngày/cơ sở, KPI lượt khám, số học sinh đã khám, BMI trung bình và số kết luận BMI; kèm biểu đồ tương tác lượt khám theo tháng, phân bố BMI và tình trạng huyết áp/nhịp tim. Di chuột để xem giá trị, bấm vào điểm tháng để lọc báo cáo; bấm vào phân loại BMI hoặc chỉ số sinh tồn để xem số lượng.
+Trang chủ y tế có bộ lọc ngày/cơ sở, KPI lượt khám, số học sinh đã khám, BMI trung bình và số kết luận BMI; kèm biểu đồ tương tác lượt khám theo tháng, phân bố BMI và tình trạng huyết áp/nhịp tim. Di chuột để xem giá trị, bấm vào điểm tháng để lọc báo cáo; nút **Quay lại khoảng ngày** khôi phục khoảng ngày trước khi drill-down. Bấm vào phân loại BMI hoặc chỉ số sinh tồn để xem số lượng.
 
 ## 11 dashboard theo đối tượng
 
