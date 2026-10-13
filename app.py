@@ -521,6 +521,7 @@ def medical_dashboard_data():
                        END AS category, COUNT(*)
                    FROM public.medical_examination_generals e
                    WHERE e.deleted_at IS NULL
+                     AND NULLIF(BTRIM(e.z_score_bmi_conclude), '') IS NOT NULL
                      AND (%s::integer IS NULL OR e.school_id = %s)
                      AND (%s::date IS NULL OR e.examination_date::date >= %s)
                      AND (%s::date IS NULL OR e.examination_date::date <= %s)
