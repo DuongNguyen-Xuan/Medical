@@ -17,7 +17,9 @@ $env:PGDATABASE = "K12_Staging_Local_Restore"
 python app.py
 ```
 
-Mở trang chọn đối tượng: <http://127.0.0.1:5000/dashboard>.
+Mở trang chủ báo cáo khám tổng quát và chọn đối tượng: <http://127.0.0.1:5000/dashboard>.
+
+Trang chủ có bộ lọc ngày/cơ sở, KPI lượt khám, số học sinh đã khám, BMI trung bình và số kết luận BMI; kèm biểu đồ lượt khám theo tháng, phân bố BMI và tình trạng huyết áp/nhịp tim.
 
 ## 11 dashboard theo đối tượng
 
