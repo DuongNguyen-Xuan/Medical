@@ -35,13 +35,13 @@ Mở trang chọn đối tượng: <http://127.0.0.1:5000/dashboard>.
 | Học sinh | `/dashboard/hoc-sinh` |
 | Phòng công tác học sinh | `/dashboard/cong-tac-hoc-sinh` |
 
-Mỗi trang có mục tiêu nghiệp vụ, bộ chỉ số, bộ lọc cơ sở/thời gian, biểu đồ đường/cột/miền và bảng tổng hợp tháng. Trang bác sĩ/đơn vị khám, giáo viên chủ nhiệm, phụ huynh và học sinh đang khóa dữ liệu cho đến khi ứng dụng có đăng nhập và phân quyền đúng phạm vi (đơn vị khám, lớp, học sinh hoặc quan hệ giám hộ).
+Đã bật cả 11 trang ở chế độ số liệu tổng hợp toàn trường. Mỗi trang có mục tiêu nghiệp vụ, bộ chỉ số, bộ lọc cơ sở/thời gian, biểu đồ đường/cột/miền và bảng tổng hợp tháng. Dữ liệu chưa được giới hạn theo tài khoản, lớp, đơn vị khám hoặc quan hệ giám hộ; không có hồ sơ cá nhân. Các chỉ số trên dashboard dành cho phụ huynh, học sinh, giáo viên và đơn vị khám cũng là tổng hợp toàn trường, không phải dữ liệu riêng của đối tượng đó.
 
 ## Dữ liệu và bảo mật
 
 Dashboard tổng hợp số hồ sơ học sinh hiện có (theo cơ sở, không phụ thuộc bộ lọc ngày), hồ sơ sức khỏe, khám nhanh, khám định kỳ, BHYT, sự kiện tiêm chủng và hồ sơ thuốc từ các bảng `medical_*`. API dashboard chỉ trả số liệu tổng hợp và chuỗi số lượt theo tháng; không trả tên học sinh, triệu chứng, chẩn đoán hoặc thông tin liên hệ. Bảng bên dưới biểu đồ sử dụng cùng bộ lọc và chỉ hiển thị tháng, nhóm nghiệp vụ, số lượt. Một số trường hợp chưa có dữ liệu nguồn (ví dụ bản ghi tiêm chủng) sẽ hiển thị 0; không suy ra tỷ lệ bao phủ nếu chưa có mẫu số học sinh đủ điều kiện.
 
-Dữ liệu sức khỏe là dữ liệu nhạy cảm. Ứng dụng hiện chưa có xác thực người dùng, phân quyền hoặc nhật ký truy cập; chỉ chạy trên máy cục bộ, không đổi `APP_HOST` sang địa chỉ mạng và không dùng để cung cấp hồ sơ cá nhân. Chưa kết nối gửi thông báo phụ huynh, chưa có cổng phụ huynh/học sinh, và chưa có luồng nhập/xuất Excel nghiệp vụ. Cần hoàn thiện các chức năng này cùng SSO và ma trận quyền trước khi triển khai thực tế.
+Dữ liệu sức khỏe là dữ liệu nhạy cảm. Ứng dụng hiện chưa có xác thực người dùng, phân quyền hoặc nhật ký truy cập; chỉ chạy trên máy cục bộ, không đổi `APP_HOST` sang địa chỉ mạng và không dùng để cung cấp hồ sơ cá nhân. Dashboard phụ huynh/học sinh hiện chỉ là số liệu tổng hợp toàn trường, không phải cổng xem hồ sơ riêng. Chưa kết nối gửi thông báo phụ huynh, và chưa có luồng nhập/xuất Excel nghiệp vụ. Cần hoàn thiện các chức năng này cùng SSO và ma trận quyền trước khi triển khai thực tế.
 
 ## Trình duyệt PostgreSQL và API dùng chung
 

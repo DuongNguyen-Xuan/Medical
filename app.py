@@ -760,8 +760,7 @@ MEDICAL_ROLES = [
             ("bmiConclusions", "Hồ sơ có kết luận BMI", "examinations_with_bmi_conclusion"),
         ],
         "charts": [{"category": "Khám định kỳ", "type": "line"}],
-        "enabled": False,
-        "access_note": "Dashboard dành cho đơn vị khám bên ngoài chưa được mở vì hệ thống chưa có tài khoản, phân quyền hoặc cơ chế chia sẻ dữ liệu an toàn.",
+        "enabled": True,
     },
     {
         "key": "phu-trach-bhyt",
@@ -808,34 +807,39 @@ MEDICAL_ROLES = [
         "key": "giao-vien-chu-nhiem",
         "title": "Giáo viên chủ nhiệm",
         "subtitle": "Phối hợp xác nhận thông báo y tế của lớp được phân công",
-        "story": "Là Giáo viên chủ nhiệm, tôi muốn xem các thông báo y tế đang chờ xác nhận trong lớp được phân công để phối hợp phản hồi với nhân viên y tế và gia đình kịp thời.",
+        "story": "Là Giáo viên chủ nhiệm, tôi muốn theo dõi tổng hợp hoạt động khám và thông báo y tế toàn trường để phối hợp công việc; dữ liệu theo lớp chỉ được mở sau khi có đăng nhập và phân quyền.",
         "metrics": [
             ("teacherConfirmations", "Thông báo chờ xác nhận", "teacher_confirmations_pending"),
             ("parentNotifications", "Thông báo đã gửi phụ huynh", "parent_notifications_sent"),
         ],
-        "charts": [],
-        "enabled": False,
-        "access_note": "Chưa thể giới hạn dữ liệu theo lớp hoặc giáo viên đăng nhập. Cần bổ sung xác thực và phân quyền lớp trước khi bật dashboard này.",
+        "charts": [{"category": "Khám nhanh", "type": "area"}],
+        "enabled": True,
     },
     {
         "key": "phu-huynh",
         "title": "Phụ huynh / người giám hộ",
         "subtitle": "Cổng theo dõi thông tin của học sinh được giám hộ",
-        "story": "Là Phụ huynh, tôi muốn xem hồ sơ, thông báo sức khỏe và lịch khám của chính con mình để phối hợp chăm sóc và cập nhật thông tin cần thiết cho nhà trường.",
-        "metrics": [],
-        "charts": [],
-        "enabled": False,
-        "access_note": "Chưa thể mở dữ liệu học sinh cho phụ huynh. Cần đăng nhập, xác minh quan hệ giám hộ, giới hạn đúng học sinh và ghi nhật ký truy cập.",
+        "story": "Là Phụ huynh, tôi muốn theo dõi số liệu hoạt động y tế tổng hợp của nhà trường; hồ sơ, thông báo và lịch khám của con chỉ được mở sau khi xác minh quan hệ giám hộ.",
+        "metrics": [
+            ("quickExams", "Lượt khám nhanh toàn trường", "quick_examinations"),
+            ("periodicExams", "Lượt khám định kỳ toàn trường", "periodic_examinations"),
+            ("vaccinationEvents", "Sự kiện tiêm chủng toàn trường", "vaccination_events"),
+        ],
+        "charts": [{"category": "Khám nhanh", "type": "line"}],
+        "enabled": True,
     },
     {
         "key": "hoc-sinh",
         "title": "Học sinh",
         "subtitle": "Thông tin chăm sóc sức khỏe phù hợp với học sinh",
-        "story": "Là Học sinh, tôi muốn xem lịch khám và thông báo sức khỏe được phép chia sẻ để chủ động tham gia các hoạt động chăm sóc sức khỏe tại trường.",
-        "metrics": [],
-        "charts": [],
-        "enabled": False,
-        "access_note": "Chưa mở dashboard cho học sinh. Cần xây dựng tài khoản phù hợp độ tuổi, quy tắc đồng ý của người giám hộ và chỉ hiển thị thông tin được phép.",
+        "story": "Là Học sinh, tôi muốn theo dõi số liệu hoạt động y tế tổng hợp của nhà trường; lịch khám cá nhân và thông báo riêng chỉ được mở qua tài khoản phù hợp độ tuổi và quy tắc đồng ý của người giám hộ.",
+        "metrics": [
+            ("quickExams", "Lượt khám nhanh toàn trường", "quick_examinations"),
+            ("periodicExams", "Lượt khám định kỳ toàn trường", "periodic_examinations"),
+            ("vaccinationEvents", "Sự kiện tiêm chủng toàn trường", "vaccination_events"),
+        ],
+        "charts": [{"category": "Khám định kỳ", "type": "area"}],
+        "enabled": True,
     },
     {
         "key": "cong-tac-hoc-sinh",
@@ -882,10 +886,10 @@ footer{max-width:1240px;margin:auto;padding:20px;color:#64748b;font-size:12px;li
 @media(max-width:600px){.cards{grid-template-columns:1fr}main{margin:24px auto;padding:0 12px}a.card{min-height:0}}
 </style></head><body>
 <header><h1>Dashboard Y tế học đường</h1><p>Chọn đối tượng để mở dashboard nghiệp vụ riêng.</p></header>
-<main><p class="intro">Có 11 dashboard theo vai trò. Mỗi trang có chỉ số và user story phù hợp. Một số trang cần hoàn thiện đăng nhập và phân quyền trước khi bật dữ liệu cá nhân.</p>
+<main><p class="intro">Có 11 dashboard theo vai trò, hiện bật ở chế độ số liệu tổng hợp. Dữ liệu cá nhân, hồ sơ theo lớp và thông tin riêng của học sinh chưa được mở.</p>
 <section class="cards" aria-label="Chọn đối tượng dashboard y tế">
-{% for role in roles %}<a class="card" href="/dashboard/{{ role.key }}"><span class="tag">Đối tượng {{ loop.index }}</span><h2>{{ role.title }}</h2><p class="desc">{{ role.subtitle }}</p>{% if not role.enabled %}<span class="pending">Cần bổ sung phân quyền trước khi mở dữ liệu</span>{% endif %}<span class="link">Mở dashboard →</span></a>{% endfor %}
-</section></main><footer>Dữ liệu sức khỏe là dữ liệu nhạy cảm. Dashboard chỉ hiển thị tổng hợp; hồ sơ cá nhân chỉ được mở khi đã triển khai xác thực, phân quyền và kiểm soát truy cập phù hợp.</footer></body></html>"""
+{% for role in roles %}<a class="card" href="/dashboard/{{ role.key }}"><span class="tag">Đối tượng {{ loop.index }}</span><h2>{{ role.title }}</h2><p class="desc">{{ role.subtitle }}</p><span class="link">Mở dashboard →</span></a>{% endfor %}
+</section></main><footer>Dữ liệu sức khỏe là dữ liệu nhạy cảm. Tất cả dashboard chỉ hiển thị tổng hợp toàn trường, chưa giới hạn theo tài khoản/lớp và không có hồ sơ cá nhân. Chỉ chạy cục bộ cho đến khi triển khai xác thực và phân quyền.</footer></body></html>"""
 
 
 MEDICAL_DASHBOARD = r"""<!doctype html>
@@ -919,7 +923,7 @@ button{font:inherit}.toolbar button{padding:10px 15px;border:0;border-radius:6px
   <label>Cơ sở<select id="school"><option value="">Tất cả cơ sở</option></select></label><button id="loadButton" type="submit">Lọc dữ liệu</button>
  </form>
  <div id="status" class="status" role="alert"></div>
- <p class="notice"><b>Lưu ý bảo mật:</b> Trang này chỉ hiển thị số liệu tổng hợp, không trả tên học sinh, triệu chứng, chẩn đoán hoặc thông tin liên hệ. Dữ liệu sức khỏe là dữ liệu nhạy cảm; không dùng số liệu này thay cho tư vấn y tế chuyên môn.</p>
+ <p class="notice"><b>Lưu ý bảo mật:</b> Trang này hiển thị số liệu tổng hợp toàn trường, chưa giới hạn theo tài khoản, lớp hoặc quan hệ giám hộ. Không trả tên học sinh, triệu chứng, chẩn đoán hoặc thông tin liên hệ. Dữ liệu sức khỏe là dữ liệu nhạy cảm; chỉ chạy cục bộ và không dùng số liệu này thay cho tư vấn y tế chuyên môn.</p>
  <section class="cards" aria-label="Chỉ số theo vai trò"><div class="card"><span>Hồ sơ học sinh hiện có (tổng hợp)</span><strong id="studentProfiles">—</strong></div>{% for metric in role.metrics %}<div class="card"><span>{{ metric[1] }}</span><strong id="{{ metric[0] }}">—</strong></div>{% endfor %}</section>
  <section class="grid" aria-label="Biểu đồ theo vai trò">{% for chart in role.charts %}<div class="panel chart"><h2>{{ chart.category }} theo tháng</h2><p>Bấm điểm dữ liệu để lọc về tháng tương ứng. Dạng biểu đồ: {{ chart.type }}.</p><div id="chart-{{ loop.index0 }}"></div></div>{% endfor %}
  {% if role.key in ["ban-giam-hieu","truong-bo-phan-y-te","phu-trach-bhyt"] %}<div class="panel"><h2>Tổng hợp BHYT</h2><p id="bhytSummary">Đang tải...</p></div>{% endif %}
