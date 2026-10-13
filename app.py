@@ -1231,7 +1231,7 @@ DASHBOARD_HOME = """<!doctype html>
 <title>Dashboard y tế học đường | Chọn đối tượng</title>
 <style>
 :root{font-family:"Segoe UI",Arial,sans-serif;color:#172033;background:#f3f6fb}*{box-sizing:border-box}
-body{margin:0}header{background:#14532d;color:#fff;padding:26px max(24px,calc((100vw - 1240px)/2))}
+body{margin:0}header{background:#14532d;color:#fff;padding:26px max(24px,calc((100vw - 1240px)/2))}.data-home-link{display:inline-block;margin-bottom:12px;color:#dcfce7;font-size:13px;text-decoration:none}.data-home-link:hover,.data-home-link:focus{text-decoration:underline}
 h1{margin:0 0 6px;font-size:27px}header p{margin:0;color:#dcfce7}
 main{max-width:1240px;margin:34px auto;padding:0 20px}.intro{color:#64748b;margin-bottom:20px;line-height:1.55}
 .cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
@@ -1249,7 +1249,7 @@ footer{max-width:1240px;margin:auto;padding:20px;color:#64748b;font-size:12px;li
 @media(max-width:900px){.report-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:600px){.cards,.report-grid{grid-template-columns:1fr}.report-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}main{margin:24px auto;padding:0 12px}a.card{min-height:0}.report{padding:12px}}
 </style></head><body>
-<header><h1>Dashboard Y tế học đường</h1><p>Chọn đối tượng để mở dashboard nghiệp vụ riêng.</p></header>
+<header><a class="data-home-link" href="/">← Quay lại trang dữ liệu</a><h1>Dashboard Y tế học đường</h1><p>Chọn đối tượng để mở dashboard nghiệp vụ riêng.</p></header>
 <main><p class="intro">Có 11 dashboard theo vai trò và báo cáo khám tổng quát toàn trường. Chọn khoảng thời gian/cơ sở để xem xu hướng, phân bố BMI, huyết áp và nhịp tim.</p>
 <section class="report" aria-labelledby="generalExamTitle">
  <h2 id="generalExamTitle">Báo cáo khám tổng quát</h2><p class="report-intro">Tổng hợp hồ sơ khám định kỳ theo ngày khám; phân nhóm BMI, huyết áp và nhịp tim từ kết quả đã ghi nhận.</p>
