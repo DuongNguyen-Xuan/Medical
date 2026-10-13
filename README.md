@@ -19,7 +19,7 @@ python app.py
 
 Mở trang trình duyệt dữ liệu tại <http://127.0.0.1:5000/>. Chọn **Phân hệ Y tế** để vào trang chủ báo cáo và chọn dashboard: <http://127.0.0.1:5000/dashboard>. Trên trang chủ phân hệ Y tế, chọn **Quay lại trang dữ liệu** để trở về.
 
-Trang chủ y tế có bộ lọc ngày/cơ sở, KPI lượt khám, số học sinh đã khám, BMI trung bình và số kết luận BMI; kèm biểu đồ tương tác lượt khám theo tháng, phân bố BMI và tình trạng huyết áp/nhịp tim. Di chuột để xem giá trị, bấm vào điểm tháng để lọc báo cáo; nút **Quay lại khoảng ngày** khôi phục khoảng ngày trước khi drill-down. Các biểu đồ theo vai trò cũng có nút này sau khi chọn điểm tháng. Bấm vào phân loại BMI hoặc chỉ số sinh tồn để xem số lượng.
+Trang chủ y tế và dashboard theo vai trò có bộ lọc cơ sở, khối, lớp và thời gian. Chọn nhanh tuần gần nhất, quý hiện tại, kỳ học hoặc năm học; có thể chỉnh ngày trực tiếp. Bộ lọc phạm vi áp dụng cho KPI, biểu đồ, bảng tổng hợp và hồ sơ chi tiết. Trang chủ còn có KPI lượt khám, số học sinh đã khám, BMI trung bình và số kết luận BMI; kèm biểu đồ tương tác lượt khám theo tháng, phân bố BMI và tình trạng huyết áp/nhịp tim. Di chuột để xem giá trị, bấm vào điểm tháng để lọc báo cáo; nút **Quay lại khoảng ngày** khôi phục khoảng ngày trước khi drill-down. Các biểu đồ theo vai trò cũng có nút này sau khi chọn điểm tháng. Bấm vào phân loại BMI hoặc chỉ số sinh tồn để xem số lượng.
 
 ## 11 dashboard theo đối tượng
 
@@ -41,11 +41,12 @@ Trang chủ y tế có bộ lọc ngày/cơ sở, KPI lượt khám, số học 
 
 ## Dữ liệu và bảo mật
 
-Dashboard tổng hợp dữ liệu từ `profile_student` và các bảng `medical_*`. Biểu đồ và bảng tháng là tổng hợp; bảng hồ sơ trả dữ liệu chi tiết theo phạm vi nghiệp vụ của dashboard. Hồ sơ chi tiết mặc định giới hạn thời gian ở ba năm gần nhất, có lọc theo ngày/cơ sở/loại hồ sơ/từ khóa và phân trang.
+Dashboard tổng hợp dữ liệu từ `profile_student` và các bảng `medical_*`. Bộ lọc lớp/khối dùng danh sách lớp đang có trong `classroom_student`; bộ chọn kỳ và năm học lấy mốc ngày từ `school_term` và `school_year`. Biểu đồ và bảng tháng là tổng hợp; bảng hồ sơ trả dữ liệu chi tiết theo phạm vi nghiệp vụ của dashboard. Hồ sơ chi tiết mặc định giới hạn thời gian ở ba năm gần nhất, có lọc theo ngày/cơ sở/khối/lớp/loại hồ sơ/từ khóa và phân trang.
 
 **Cảnh báo quan trọng:** dữ liệu sức khỏe là dữ liệu nhạy cảm. Chọn dashboard chỉ thay đổi giao diện và loại hồ sơ, không xác thực danh tính hay đảm bảo quyền theo lớp/quan hệ giám hộ; người truy cập cục bộ có thể chọn vai trò khác. Trang trình duyệt dữ liệu ở `/` chỉ liệt kê/xem các bảng không nhận diện là dữ liệu cá nhân hoặc y tế; API dữ liệu, Power BI, CRUD và xuất CSV đều chặn các bảng có tên hoặc cột nhận diện nhạy cảm. Đây là biện pháp giảm rủi ro, không thay thế phân quyền server-side. Flask được cố định bind vào `127.0.0.1`; không đưa cổng này ra mạng, không dùng chung máy với người không được phép và không triển khai thực tế trước khi tích hợp SSO, phân quyền server-side và nhật ký truy cập. Chưa kết nối gửi thông báo phụ huynh hoặc luồng nhập/xuất Excel nghiệp vụ.
 
 ## API dashboard
 
-- `/api/medical/dashboard?from=2024-01-01&to=2026-12-31&school_id=3` — số liệu y tế tổng hợp theo ngày và cơ sở.
-- `/api/medical/records?role=nhan-vien-y-te&from=2024-01-01&to=2026-12-31` — hồ sơ theo nhóm nghiệp vụ của dashboard; `contact` được cố định là `***`.
+- `/api/medical/filter-options?school_id=3` — danh sách khối, lớp, kỳ học và năm học để lọc.
+- `/api/medical/dashboard?from=2024-01-01&to=2026-12-31&school_id=3&grade_id=2&classroom_id=10` — số liệu tổng hợp; bộ lọc khối/lớp là tùy chọn.
+- `/api/medical/records?role=nhan-vien-y-te&from=2024-01-01&to=2026-12-31&grade_id=2&classroom_id=10` — hồ sơ theo nhóm nghiệp vụ của dashboard; `contact` được cố định là `***`.

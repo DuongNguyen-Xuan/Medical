@@ -447,17 +447,178 @@ def dashboard_home():
     return render_template_string(DASHBOARD_HOME, roles=MEDICAL_ROLES)
 
 
+def configure_medical_student_scope(conn, school_id, grade_id, classroom_id):
+    enabled = grade_id is not None or classroom_id is not None
+    conn.execute(
+        """CREATE TEMP TABLE medical_scope_config (enabled boolean NOT NULL)
+           ON COMMIT DROP"""
+    )
+    conn.execute("INSERT INTO medical_scope_config VALUES (%s)", (enabled,))
+    conn.execute(
+        """CREATE TEMP TABLE medical_scope_students (student_id integer PRIMARY KEY)
+           ON COMMIT DROP"""
+    )
+    if enabled:
+        conn.execute(
+            """INSERT INTO medical_scope_students (student_id)
+               SELECT DISTINCT cs.student_id
+               FROM public.classroom_student cs
+               JOIN public.classroom c ON c.id = cs.classroom_id AND c.deleted_at IS NULL
+               WHERE cs.deleted_at IS NULL
+                 AND cs.student_id IS NOT NULL
+                 AND (%s::integer IS NULL OR c.school_id = %s)
+                 AND (%s::integer IS NULL OR c.grade_id = %s)
+                 AND (%s::integer IS NULL OR c.id = %s)""",
+            (school_id, school_id, grade_id, grade_id, classroom_id, classroom_id),
+        )
+    scoped_sources = {
+        "dashboard_profile_student": ("profile_student", "student_id"),
+        "dashboard_health_records": ("medical_student_health_records", "user_id"),
+        "dashboard_quick_examinations": ("medical_quick_examinations", "user_id"),
+        "dashboard_general_examinations": ("medical_examination_generals", "user_id"),
+        "dashboard_bhyt_records": ("medical_manager_bhyts", "user_id"),
+        "dashboard_vaccination_records": ("medical_vaccination_records", "user_id"),
+        "dashboard_medicines": ("medical_coach_medicines", "user_id"),
+    }
+    for view, (table, student_column) in scoped_sources.items():
+        conn.execute(
+            sql.SQL(
+                """CREATE TEMP VIEW {} AS
+                   SELECT source.*
+                   FROM public.{} source
+                   WHERE NOT (SELECT enabled FROM pg_temp.medical_scope_config)
+                      OR source.{} IN (SELECT student_id FROM pg_temp.medical_scope_students)"""
+            ).format(sql.Identifier(view), sql.Identifier(table), sql.Identifier(student_column))
+        )
+    conn.execute(
+        """CREATE TEMP VIEW dashboard_vaccination_events AS
+           SELECT event.*
+           FROM public.medical_vaccination_events event
+           WHERE NOT (SELECT enabled FROM pg_temp.medical_scope_config)
+              OR EXISTS (
+                  SELECT 1
+                  FROM pg_temp.dashboard_vaccination_records record
+                  WHERE record.medical_vaccination_event_id = event.id
+              )"""
+    )
+
+
+def medical_scope_is_valid(conn, school_id, grade_id, classroom_id):
+    grade_exists, classroom_exists = conn.execute(
+        """SELECT
+               EXISTS (
+                   SELECT 1 FROM public.grade g
+                   WHERE g.id = %s AND g.deleted_at IS NULL
+                     AND (%s::integer IS NULL OR g.school_id = %s)
+               ),
+               EXISTS (
+                   SELECT 1 FROM public.classroom c
+                   WHERE c.id = %s AND c.deleted_at IS NULL
+                     AND (%s::integer IS NULL OR c.school_id = %s)
+                     AND (%s::integer IS NULL OR c.grade_id = %s)
+               )""",
+        (
+            grade_id, school_id, school_id,
+            classroom_id, school_id, school_id, grade_id, grade_id,
+        ),
+    ).fetchone()
+    return (grade_id is None or grade_exists) and (classroom_id is None or classroom_exists)
+
+
+@app.get("/api/medical/filter-options")
+def medical_filter_options():
+    school_value = request.args.get("school_id", "").strip()
+    try:
+        school_id = int(school_value) if school_value else None
+        if school_id is not None and school_id < 1:
+            raise ValueError("school_id phải là số nguyên dương.")
+    except ValueError as exc:
+        return jsonify({"error": f"Tham số không hợp lệ: {exc}"}), 400
+    try:
+        with connect_db() as conn:
+            schools = conn.execute(
+                """SELECT id, name FROM public.school
+                   WHERE deleted_at IS NULL ORDER BY name, id"""
+            ).fetchall()
+            grades = conn.execute(
+                """SELECT DISTINCT g.id, g.name, c.school_id, s.name
+                   FROM public.grade g
+                   JOIN public.classroom c ON c.grade_id = g.id AND c.deleted_at IS NULL
+                   JOIN public.school s ON s.id = c.school_id AND s.deleted_at IS NULL
+                   WHERE g.deleted_at IS NULL
+                     AND (%s::integer IS NULL OR c.school_id = %s)
+                   ORDER BY g.name, s.name, g.id""",
+                (school_id, school_id),
+            ).fetchall()
+            classrooms = conn.execute(
+                """SELECT c.id, c.name, c.grade_id, c.school_id, s.name, sy.name
+                   FROM public.classroom c
+                   JOIN public.school s ON s.id = c.school_id AND s.deleted_at IS NULL
+                   LEFT JOIN public.school_year sy ON sy.id = c.school_year_id AND sy.deleted_at IS NULL
+                   WHERE c.deleted_at IS NULL
+                     AND (%s::integer IS NULL OR c.school_id = %s)
+                   ORDER BY c.grade_id, s.name, c.name, c.id""",
+                (school_id, school_id),
+            ).fetchall()
+            terms = conn.execute(
+                """SELECT t.id, t.name, t.start_at::date, t.end_at::date, t.school_id, s.name
+                   FROM public.school_term t
+                   JOIN public.school s ON s.id = t.school_id AND s.deleted_at IS NULL
+                   WHERE t.deleted_at IS NULL
+                     AND (%s::integer IS NULL OR t.school_id = %s)
+                   ORDER BY (CURRENT_DATE BETWEEN t.start_at::date AND t.end_at::date) DESC,
+                            t.start_at DESC, t.id DESC""",
+                (school_id, school_id),
+            ).fetchall()
+            years = conn.execute(
+                """SELECT y.id, y.name, y.start_at::date, y.end_at::date, y.school_id, s.name
+                   FROM public.school_year y
+                   JOIN public.school s ON s.id = y.school_id AND s.deleted_at IS NULL
+                   WHERE y.deleted_at IS NULL
+                     AND (%s::integer IS NULL OR y.school_id = %s)
+                   ORDER BY (CURRENT_DATE BETWEEN y.start_at::date AND y.end_at::date) DESC,
+                            y.start_at DESC, y.id DESC""",
+                (school_id, school_id),
+            ).fetchall()
+        def period_rows(rows, kind):
+            return [{
+                "id": row[0],
+                "label": f"{row[1]} · {row[5]}" if school_id is None else row[1],
+                "from": row[2].isoformat(),
+                "to": row[3].isoformat(),
+                "school_id": row[4],
+                "kind": kind,
+            } for row in rows]
+        return jsonify({
+            "schools": [{"id": row[0], "name": row[1]} for row in schools],
+            "grades": [{"id": row[0], "name": row[1], "school_id": row[2], "school_name": row[3]} for row in grades],
+            "classrooms": [{"id": row[0], "name": row[1], "grade_id": row[2], "school_id": row[3], "school_name": row[4], "school_year_name": row[5]} for row in classrooms],
+            "terms": period_rows(terms, "term"),
+            "school_years": period_rows(years, "year"),
+        })
+    except psycopg.Error as exc:
+        return jsonify({"error": f"Không tải được bộ lọc lớp học: {exc}"}), 503
+
+
 @app.get("/api/medical/dashboard")
 def medical_dashboard_data():
     start_value = request.args.get("from", "").strip()
     end_value = request.args.get("to", "").strip()
     school_value = request.args.get("school_id", "").strip()
+    grade_value = request.args.get("grade_id", "").strip()
+    classroom_value = request.args.get("classroom_id", "").strip()
     try:
         start_date = date.fromisoformat(start_value) if start_value else None
         end_date = date.fromisoformat(end_value) if end_value else None
         school_id = int(school_value) if school_value else None
+        grade_id = int(grade_value) if grade_value else None
+        classroom_id = int(classroom_value) if classroom_value else None
         if school_id is not None and school_id < 1:
             raise ValueError("school_id phải là số nguyên dương.")
+        if grade_id is not None and grade_id < 1:
+            raise ValueError("grade_id phải là số nguyên dương.")
+        if classroom_id is not None and classroom_id < 1:
+            raise ValueError("classroom_id phải là số nguyên dương.")
         if start_date and end_date and start_date > end_date:
             raise ValueError("Ngày bắt đầu không được sau ngày kết thúc.")
     except ValueError as exc:
@@ -468,6 +629,9 @@ def medical_dashboard_data():
     end_filter = end_date
     try:
         with connect_db() as conn:
+            if not medical_scope_is_valid(conn, school_id, grade_id, classroom_id):
+                return jsonify({"error": "Khối hoặc lớp không thuộc cơ sở đã chọn."}), 400
+            configure_medical_student_scope(conn, school_id, grade_id, classroom_id)
             schools = conn.execute(
                 """SELECT id, name FROM public.school
                    WHERE deleted_at IS NULL
@@ -476,7 +640,7 @@ def medical_dashboard_data():
 
             student_profiles = conn.execute(
                 """SELECT COUNT(*)
-                   FROM public.profile_student p
+                   FROM pg_temp.dashboard_profile_student p
                    WHERE p.deleted_at IS NULL
                      AND (%s::integer IS NULL OR p.school_id = %s)""",
                 (school_filter, school_filter),
@@ -486,7 +650,7 @@ def medical_dashboard_data():
                 """SELECT COUNT(*), COUNT(DISTINCT user_id),
                           COUNT(*) FILTER (WHERE NULLIF(BTRIM(di_ung), '') IS NOT NULL),
                           COUNT(*) FILTER (WHERE NULLIF(BTRIM(current_disease), '') IS NOT NULL)
-                   FROM public.medical_student_health_records h
+                   FROM pg_temp.dashboard_health_records h
                    WHERE h.deleted_at IS NULL
                      AND (%s::integer IS NULL OR h.school_id = %s)
                      AND (%s::date IS NULL OR h.created_at::date >= %s)
@@ -498,7 +662,7 @@ def medical_dashboard_data():
                 """SELECT COUNT(*), COUNT(DISTINCT user_id),
                           COUNT(*) FILTER (WHERE status_send_to_parent::text = 'DA_GUI_CHO_PH'),
                           COUNT(*) FILTER (WHERE status_send_to_parent::text = 'CHO_GVCN_XAC_NHAN')
-                   FROM public.medical_quick_examinations q
+                   FROM pg_temp.dashboard_quick_examinations q
                    WHERE q.deleted_at IS NULL
                      AND (%s::integer IS NULL OR q.school_id = %s)
                      AND (%s::date IS NULL OR q.day::date >= %s)
@@ -510,7 +674,7 @@ def medical_dashboard_data():
                 """SELECT COUNT(*), COUNT(DISTINCT user_id),
                           AVG(bmi) FILTER (WHERE bmi > 0),
                           COUNT(*) FILTER (WHERE NULLIF(BTRIM(z_score_bmi_conclude), '') IS NOT NULL)
-                   FROM public.medical_examination_generals e
+                   FROM pg_temp.dashboard_general_examinations e
                    WHERE e.deleted_at IS NULL
                      AND (%s::integer IS NULL OR e.school_id = %s)
                      AND (%s::date IS NULL OR e.examination_date::date >= %s)
@@ -520,7 +684,7 @@ def medical_dashboard_data():
 
             exam_monthly = conn.execute(
                 """SELECT date_trunc('month', e.examination_date)::date AS period, COUNT(*)
-                   FROM public.medical_examination_generals e
+                   FROM pg_temp.dashboard_general_examinations e
                    WHERE e.deleted_at IS NULL
                      AND e.examination_date IS NOT NULL
                      AND (%s::integer IS NULL OR e.school_id = %s)
@@ -542,7 +706,7 @@ def medical_dashboard_data():
                              THEN 'Bình thường'
                            ELSE 'Khác / chưa phân loại'
                        END AS category, COUNT(*)
-                   FROM public.medical_examination_generals e
+                   FROM pg_temp.dashboard_general_examinations e
                    WHERE e.deleted_at IS NULL
                      AND NULLIF(BTRIM(e.z_score_bmi_conclude), '') IS NOT NULL
                      AND (%s::integer IS NULL OR e.school_id = %s)
@@ -562,7 +726,7 @@ def medical_dashboard_data():
                                   WHEN lower(danh_gia_huyet_ap) LIKE '%%ổn định%%' THEN 'Ổn định'
                                   ELSE 'Khác / chưa phân loại'
                               END AS category
-                       FROM public.medical_examination_generals e
+                       FROM pg_temp.dashboard_general_examinations e
                        WHERE e.deleted_at IS NULL
                          AND NULLIF(BTRIM(e.danh_gia_huyet_ap), '') IS NOT NULL
                          AND (%s::integer IS NULL OR e.school_id = %s)
@@ -576,7 +740,7 @@ def medical_dashboard_data():
                                   WHEN lower(danh_gia_nhip_tim) LIKE '%%bình thường%%' THEN 'Bình thường'
                                   ELSE 'Khác / chưa phân loại'
                               END
-                       FROM public.medical_examination_generals e
+                       FROM pg_temp.dashboard_general_examinations e
                        WHERE e.deleted_at IS NULL
                          AND NULLIF(BTRIM(e.danh_gia_nhip_tim), '') IS NOT NULL
                          AND (%s::integer IS NULL OR e.school_id = %s)
@@ -595,7 +759,7 @@ def medical_dashboard_data():
                           COUNT(*) FILTER (WHERE ngay_het_han::date >= CURRENT_DATE
                                              AND ngay_het_han::date < CURRENT_DATE + 30),
                           COUNT(*) FILTER (WHERE ngay_het_han::date < CURRENT_DATE)
-                   FROM public.medical_manager_bhyts b
+                   FROM pg_temp.dashboard_bhyt_records b
                    WHERE b.deleted_at IS NULL
                      AND (%s::integer IS NULL OR b.school_id = %s)
                      AND (%s::date IS NULL OR COALESCE(b.ngay_hieu_luc, b.created_at)::date >= %s)
@@ -606,8 +770,8 @@ def medical_dashboard_data():
             vaccination = conn.execute(
                 """SELECT COUNT(*),
                           (SELECT COUNT(*)
-                           FROM public.medical_vaccination_records r
-                           JOIN public.medical_vaccination_events re
+                           FROM pg_temp.dashboard_vaccination_records r
+                           JOIN pg_temp.dashboard_vaccination_events re
                              ON re.id = r.medical_vaccination_event_id
                             AND re.deleted_at IS NULL
                            WHERE r.deleted_at IS NULL
@@ -615,15 +779,15 @@ def medical_dashboard_data():
                              AND (%s::date IS NULL OR re.date::date >= %s)
                              AND (%s::date IS NULL OR re.date::date <= %s)),
                           (SELECT COUNT(DISTINCT r.user_id)
-                           FROM public.medical_vaccination_records r
-                           JOIN public.medical_vaccination_events re
+                           FROM pg_temp.dashboard_vaccination_records r
+                           JOIN pg_temp.dashboard_vaccination_events re
                              ON re.id = r.medical_vaccination_event_id
                             AND re.deleted_at IS NULL
                            WHERE r.deleted_at IS NULL
                              AND (%s::integer IS NULL OR r.school_id = %s)
                              AND (%s::date IS NULL OR re.date::date >= %s)
                              AND (%s::date IS NULL OR re.date::date <= %s))
-                   FROM public.medical_vaccination_events v
+                   FROM pg_temp.dashboard_vaccination_events v
                    WHERE v.deleted_at IS NULL
                      AND (%s::integer IS NULL OR v.school_id = %s)
                      AND (%s::date IS NULL OR v.date::date >= %s)
@@ -640,7 +804,7 @@ def medical_dashboard_data():
                           COUNT(DISTINCT m.id) FILTER (
                               WHERE d.start_date::date <= CURRENT_DATE
                                 AND (d.end_date IS NULL OR d.end_date::date >= CURRENT_DATE))
-                   FROM public.medical_coach_medicines m
+                   FROM pg_temp.dashboard_medicines m
                    LEFT JOIN public.medical_coach_medicine_details d
                      ON d.medical_coach_medicine_id = m.id AND d.deleted_at IS NULL
                    WHERE m.deleted_at IS NULL
@@ -653,7 +817,7 @@ def medical_dashboard_data():
             series = conn.execute(
                 """SELECT 'Khám nhanh' AS category, date_trunc('month', q.day)::date AS period,
                           COUNT(*) AS total
-                   FROM public.medical_quick_examinations q
+                   FROM pg_temp.dashboard_quick_examinations q
                    WHERE q.deleted_at IS NULL
                      AND q.day IS NOT NULL
                      AND (%s::integer IS NULL OR q.school_id = %s)
@@ -662,7 +826,7 @@ def medical_dashboard_data():
                    GROUP BY 1, 2
                    UNION ALL
                    SELECT 'Khám định kỳ', date_trunc('month', e.examination_date)::date, COUNT(*)
-                   FROM public.medical_examination_generals e
+                   FROM pg_temp.dashboard_general_examinations e
                    WHERE e.deleted_at IS NULL
                      AND e.examination_date IS NOT NULL
                      AND (%s::integer IS NULL OR e.school_id = %s)
@@ -671,7 +835,7 @@ def medical_dashboard_data():
                    GROUP BY 1, 2
                    UNION ALL
                    SELECT 'Sự kiện tiêm chủng', date_trunc('month', v.date)::date, COUNT(*)
-                   FROM public.medical_vaccination_events v
+                   FROM pg_temp.dashboard_vaccination_events v
                    WHERE v.deleted_at IS NULL
                      AND v.date IS NOT NULL
                      AND (%s::integer IS NULL OR v.school_id = %s)
@@ -680,7 +844,7 @@ def medical_dashboard_data():
                    GROUP BY 1, 2
                    UNION ALL
                    SELECT 'BHYT', date_trunc('month', COALESCE(b.ngay_hieu_luc, b.created_at))::date, COUNT(*)
-                   FROM public.medical_manager_bhyts b
+                   FROM pg_temp.dashboard_bhyt_records b
                    WHERE b.deleted_at IS NULL
                      AND COALESCE(b.ngay_hieu_luc, b.created_at) IS NOT NULL
                      AND (%s::integer IS NULL OR b.school_id = %s)
@@ -689,7 +853,7 @@ def medical_dashboard_data():
                    GROUP BY 1, 2
                    UNION ALL
                    SELECT 'Hồ sơ thuốc', date_trunc('month', m.created_at)::date, COUNT(*)
-                   FROM public.medical_coach_medicines m
+                   FROM pg_temp.dashboard_medicines m
                    WHERE m.deleted_at IS NULL
                      AND m.created_at IS NOT NULL
                      AND (%s::integer IS NULL OR m.school_id = %s)
@@ -717,6 +881,8 @@ def medical_dashboard_data():
                 "from": start_date.isoformat() if start_date else None,
                 "to": end_date.isoformat() if end_date else None,
                 "school_id": school_id,
+                "grade_id": grade_id,
+                "classroom_id": classroom_id,
             },
             "schools": [{"id": row[0], "name": row[1]} for row in schools],
             "metrics": {
@@ -767,15 +933,23 @@ def medical_student_records():
         start_value = request.args.get("from", "").strip()
         end_value = request.args.get("to", "").strip()
         school_value = request.args.get("school_id", "").strip()
+        grade_value = request.args.get("grade_id", "").strip()
+        classroom_value = request.args.get("classroom_id", "").strip()
         start_date = date.fromisoformat(start_value) if start_value else None
         end_date = date.fromisoformat(end_value) if end_value else None
         school_id = int(school_value) if school_value else None
+        grade_id = int(grade_value) if grade_value else None
+        classroom_id = int(classroom_value) if classroom_value else None
         limit = min(max(int(request.args.get("limit", "100")), 1), 200)
         offset = min(max(int(request.args.get("offset", "0")), 0), 10000)
         search = request.args.get("q", "").strip().casefold()[:100]
         category_filter = request.args.get("category", "").strip()
         if school_id is not None and school_id < 1:
             raise ValueError("school_id phải là số nguyên dương.")
+        if grade_id is not None and grade_id < 1:
+            raise ValueError("grade_id phải là số nguyên dương.")
+        if classroom_id is not None and classroom_id < 1:
+            raise ValueError("classroom_id phải là số nguyên dương.")
         if start_date and end_date and start_date > end_date:
             raise ValueError("Ngày bắt đầu không được sau ngày kết thúc.")
         if category_filter and category_filter not in categories:
@@ -920,9 +1094,17 @@ def medical_student_records():
     params = (school_id, school_id, start_date, start_date, end_date, end_date)
     try:
         with connect_db() as conn:
+            if not medical_scope_is_valid(conn, school_id, grade_id, classroom_id):
+                return jsonify({"error": "Khối hoặc lớp không thuộc cơ sở đã chọn."}), 400
+            configure_medical_student_scope(conn, school_id, grade_id, classroom_id)
             records = []
             for category in selected_categories:
                 for (query,) in queries[category]:
+                    query, order_clause = query.rsplit("ORDER BY ", 1)
+                    query += """AND (
+                        NOT (SELECT enabled FROM pg_temp.medical_scope_config)
+                        OR u.id IN (SELECT student_id FROM pg_temp.medical_scope_students)
+                    ) ORDER BY """ + order_clause
                     rows = conn.execute(query, params).fetchall()
                     records.extend({
                         "record_date": json_value(row[0]),
@@ -1254,8 +1436,12 @@ footer{max-width:1240px;margin:auto;padding:20px;color:#64748b;font-size:12px;li
 <section class="report" aria-labelledby="generalExamTitle">
  <h2 id="generalExamTitle">Báo cáo khám tổng quát</h2><p class="report-intro">Tổng hợp hồ sơ khám định kỳ theo ngày khám; phân nhóm BMI, huyết áp và nhịp tim từ kết quả đã ghi nhận.</p>
  <form class="report-filters" id="generalExamFilters">
-  <label>Từ ngày<input id="examFrom" type="date"></label><label>Đến ngày<input id="examTo" type="date"></label>
-  <label>Cơ sở<select id="examSchool"><option value="">Tất cả cơ sở</option></select></label><button id="examLoadButton" type="submit">Lọc báo cáo</button><button id="examResetMonth" type="button" hidden>Quay lại khoảng ngày</button>
+   <label>Phạm vi thời gian<select id="examPeriod"><option value="custom">Tùy chỉnh ngày</option><option value="week">Ngắn hạn · tuần gần nhất</option><option value="quarter">Trung hạn · quý hiện tại</option></select></label>
+   <label>Từ ngày<input id="examFrom" type="date"></label><label>Đến ngày<input id="examTo" type="date"></label>
+   <label>Cơ sở<select id="examSchool"><option value="">Tất cả cơ sở</option></select></label>
+   <label>Khối<select id="examGrade"><option value="">Tất cả khối</option></select></label>
+   <label>Lớp<select id="examClassroom"><option value="">Tất cả lớp</option></select></label>
+   <button id="examLoadButton" type="submit">Lọc báo cáo</button><button id="examResetMonth" type="button" hidden>Quay lại khoảng ngày</button>
  </form>
  <div id="examReportStatus" class="report-status" role="alert"></div>
  <div class="report-metrics" aria-label="Chỉ số khám tổng quát">
@@ -1275,7 +1461,7 @@ footer{max-width:1240px;margin:auto;padding:20px;color:#64748b;font-size:12px;li
 </section></main><footer>Dữ liệu báo cáo khám tổng quát là số liệu tổng hợp. Các dashboard vai trò có thể hiển thị tên và hồ sơ sức khỏe; chọn vai trò không xác thực danh tính. Chỉ chạy cục bộ trên máy tin cậy, không mở ra mạng hoặc Internet.</footer>
 <script>
 const reportApi="/api/medical/dashboard",reportNumber=new Intl.NumberFormat("vi-VN"),reportSvg="http://www.w3.org/2000/svg";
-let examRangeBeforeMonthDrilldown=null;
+let examRangeBeforeMonthDrilldown=null,examFilterOptions=null;
 function reportElement(name,attrs={}){const node=document.createElementNS(reportSvg,name);Object.entries(attrs).forEach(([key,value])=>node.setAttribute(key,value));return node}
 function clearReport(id){const node=document.getElementById(id);node.replaceChildren();return node}
 function renderMonthlyExams(rows){
@@ -1284,7 +1470,7 @@ function renderMonthlyExams(rows){
  for(let i=0;i<=3;i++){const y=top+plotHeight*i/3;svg.append(reportElement("line",{x1:left,x2:width-right,y1:y,y2:y,stroke:"#e2e8f0"}));const tick=reportElement("text",{x:left-7,y:y+4,"text-anchor":"end",fill:"#64748b","font-size":"10"});tick.textContent=reportNumber.format(Math.round(max*(3-i)/3));svg.append(tick)}
  const points=rows.map((row,index)=>({x:left+(rows.length===1?plotWidth/2:index*step),y:top+plotHeight-(Number(row.total)||0)/max*plotHeight,month:String(row.period).slice(0,7),value:Number(row.total)||0}));
  const line=reportElement("path",{d:points.map((point,index)=>`${index?"L":"M"}${point.x},${point.y}`).join(" "),fill:"none",stroke:"#0f766e","stroke-width":"3"});svg.append(line);
- points.forEach((point,index)=>{const circle=reportElement("circle",{cx:point.x,cy:point.y,r:5,fill:"#0f766e",class:"chart-point",tabindex:"0",role:"button","aria-label":`${point.month}: ${reportNumber.format(point.value)} lượt khám`}),title=reportElement("title");title.textContent=`${point.month}: ${reportNumber.format(point.value)} lượt khám`;circle.append(title);const selectMonth=()=>{if(!examRangeBeforeMonthDrilldown){examRangeBeforeMonthDrilldown={from:document.getElementById("examFrom").value,to:document.getElementById("examTo").value};document.getElementById("examResetMonth").hidden=false}const [year,month]=point.month.split("-").map(Number),lastDay=new Date(year,month,0).getDate();document.getElementById("examFrom").value=`${point.month}-01`;document.getElementById("examTo").value=`${point.month}-${String(lastDay).padStart(2,"0")}`;document.getElementById("examMonthlyDetail").textContent=`${point.month}: ${reportNumber.format(point.value)} lượt khám. Đang lọc theo tháng này.`;loadGeneralExamReport()};circle.addEventListener("click",selectMonth);circle.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();selectMonth()}});svg.append(circle);if(index%Math.max(1,Math.ceil(points.length/8))===0||index===points.length-1){const label=reportElement("text",{x:point.x,y:height-12,"text-anchor":"middle",fill:"#475569","font-size":"10"});label.textContent=point.month;svg.append(label)}});
+ points.forEach((point,index)=>{const circle=reportElement("circle",{cx:point.x,cy:point.y,r:5,fill:"#0f766e",class:"chart-point",tabindex:"0",role:"button","aria-label":`${point.month}: ${reportNumber.format(point.value)} lượt khám`}),title=reportElement("title");title.textContent=`${point.month}: ${reportNumber.format(point.value)} lượt khám`;circle.append(title);const selectMonth=()=>{if(!examRangeBeforeMonthDrilldown){examRangeBeforeMonthDrilldown={from:document.getElementById("examFrom").value,to:document.getElementById("examTo").value};document.getElementById("examResetMonth").hidden=false}const [year,month]=point.month.split("-").map(Number),lastDay=new Date(year,month,0).getDate();document.getElementById("examPeriod").value="custom";document.getElementById("examFrom").value=`${point.month}-01`;document.getElementById("examTo").value=`${point.month}-${String(lastDay).padStart(2,"0")}`;document.getElementById("examMonthlyDetail").textContent=`${point.month}: ${reportNumber.format(point.value)} lượt khám. Đang lọc theo tháng này.`;loadGeneralExamReport()};circle.addEventListener("click",selectMonth);circle.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();selectMonth()}});svg.append(circle);if(index%Math.max(1,Math.ceil(points.length/8))===0||index===points.length-1){const label=reportElement("text",{x:point.x,y:height-12,"text-anchor":"middle",fill:"#475569","font-size":"10"});label.textContent=point.month;svg.append(label)}});
  target.append(svg)
 }
 function renderBmiDistribution(rows){
@@ -1303,15 +1489,37 @@ function renderGeneralExamReport(data){
  const values=data.metrics,report=data.general_examination_report;document.getElementById("examTotal").textContent=reportNumber.format(values.periodic_examinations);document.getElementById("examStudents").textContent=reportNumber.format(values.students_with_periodic_examinations);document.getElementById("examAverageBmi").textContent=values.average_bmi===null?"—":Number(values.average_bmi).toLocaleString("vi-VN",{minimumFractionDigits:1,maximumFractionDigits:1});document.getElementById("examBmiConclusions").textContent=reportNumber.format(values.examinations_with_bmi_conclusion);
  renderMonthlyExams(report.monthly);renderBmiDistribution(report.bmi_distribution);renderVitalDistribution(report.vital_distribution)
 }
+async function loadExamFilterOptions(){
+ const school=document.getElementById("examSchool"),grade=document.getElementById("examGrade"),classroom=document.getElementById("examClassroom"),previousGrade=grade.value,previousClass=classroom.value;
+ const response=await fetch(`/api/medical/filter-options?${new URLSearchParams({school_id:school.value})}`,{cache:"no-store"}),options=await response.json();if(!response.ok)throw new Error(options.error||"Không tải được bộ lọc lớp học.");
+ if(!school.dataset.loaded){options.schools.forEach(item=>{const option=document.createElement("option");option.value=item.id;option.textContent=item.name||`Cơ sở ${item.id}`;school.append(option)});school.dataset.loaded="true"}
+ const label=(item,name)=>school.value?name:`${name} · ${item.school_name}`;
+ const classroomLabel=item=>{const duplicates=options.classrooms.filter(other=>other.name===item.name&&(!school.value||String(other.school_id)===school.value)).length>1;return [item.name||`Lớp ${item.id}`,!school.value&&item.school_name,duplicates&&item.school_year_name,duplicates&&`#${item.id}`].filter(Boolean).join(" · ")};
+ grade.replaceChildren(new Option("Tất cả khối",""));options.grades.forEach(item=>grade.append(new Option(label(item,item.name||`Khối ${item.id}`),item.id)));grade.value=options.grades.some(item=>String(item.id)===previousGrade)?previousGrade:"";
+ classroom.replaceChildren(new Option("Tất cả lớp",""));options.classrooms.filter(item=>!grade.value||String(item.grade_id)===grade.value).forEach(item=>classroom.append(new Option(classroomLabel(item),item.id)));classroom.value=options.classrooms.some(item=>String(item.id)===previousClass&&(!grade.value||String(item.grade_id)===grade.value))?previousClass:"";
+ examFilterOptions=options;const period=document.getElementById("examPeriod");period.querySelectorAll("optgroup").forEach(group=>group.remove());const terms=document.createElement("optgroup");terms.label="Trung hạn · theo kỳ học";options.terms.forEach(item=>terms.append(new Option(item.label,`term:${item.id}`)));if(options.terms.length)period.append(terms);const years=document.createElement("optgroup");years.label="Dài hạn · theo năm học";options.school_years.forEach(item=>years.append(new Option(item.label,`year:${item.id}`)));if(options.school_years.length)period.append(years);
+}
+async function applyExamPeriod(value){
+ const today=new Date(),format=day=>`${day.getFullYear()}-${String(day.getMonth()+1).padStart(2,"0")}-${String(day.getDate()).padStart(2,"0")}`;let from,to;
+ if(value==="week"){const start=new Date(today);start.setDate(today.getDate()-6);from=format(start);to=format(today)}
+ else if(value==="quarter"){const month=Math.floor(today.getMonth()/3)*3,start=new Date(today.getFullYear(),month,1),end=new Date(today.getFullYear(),month+3,0);from=format(start);to=format(end)}
+ else if(value.startsWith("term:")||value.startsWith("year:")){const [kind,id]=value.split(":"),rows=kind==="term"?examFilterOptions?.terms:examFilterOptions?.school_years,item=rows?.find(row=>String(row.id)===id);if(item){if(document.getElementById("examSchool").value!==String(item.school_id)){document.getElementById("examSchool").value=item.school_id;await loadExamFilterOptions()}from=item.from;to=item.to}}
+ if(from&&to){document.getElementById("examFrom").value=from;document.getElementById("examTo").value=to;document.getElementById("generalExamFilters").requestSubmit()}
+}
 async function loadGeneralExamReport(event){
  if(event)event.preventDefault();const button=document.getElementById("examLoadButton"),status=document.getElementById("examReportStatus");button.disabled=true;button.textContent="Đang tải...";status.style.display="none";
- try{const from=document.getElementById("examFrom").value,to=document.getElementById("examTo").value;if(from&&to&&from>to)throw new Error("Ngày bắt đầu không được sau ngày kết thúc.");const params=new URLSearchParams({from,to,school_id:document.getElementById("examSchool").value}),response=await fetch(`${reportApi}?${params}`,{cache:"no-store"}),data=await response.json();if(!response.ok)throw new Error(data.error||"Không tải được báo cáo khám tổng quát.");const select=document.getElementById("examSchool");if(!select.dataset.loaded){data.schools.forEach(school=>{const option=document.createElement("option");option.value=school.id;option.textContent=school.name||`Cơ sở ${school.id}`;select.append(option)});select.dataset.loaded="true"}renderGeneralExamReport(data)}
+ try{const from=document.getElementById("examFrom").value,to=document.getElementById("examTo").value;if(from&&to&&from>to)throw new Error("Ngày bắt đầu không được sau ngày kết thúc.");const params=new URLSearchParams({from,to,school_id:document.getElementById("examSchool").value,grade_id:document.getElementById("examGrade").value,classroom_id:document.getElementById("examClassroom").value}),response=await fetch(`${reportApi}?${params}`,{cache:"no-store"}),data=await response.json();if(!response.ok)throw new Error(data.error||"Không tải được báo cáo khám tổng quát.");renderGeneralExamReport(data)}
  catch(error){status.textContent=`Không tải được báo cáo: ${error.message}`;status.style.display="block"}
  finally{button.disabled=false;button.textContent="Lọc báo cáo"}
 }
 document.getElementById("generalExamFilters").addEventListener("submit",event=>{examRangeBeforeMonthDrilldown=null;document.getElementById("examResetMonth").hidden=true;loadGeneralExamReport(event)});
 document.getElementById("examResetMonth").addEventListener("click",()=>{if(!examRangeBeforeMonthDrilldown)return;document.getElementById("examFrom").value=examRangeBeforeMonthDrilldown.from;document.getElementById("examTo").value=examRangeBeforeMonthDrilldown.to;examRangeBeforeMonthDrilldown=null;document.getElementById("examResetMonth").hidden=true;document.getElementById("examMonthlyDetail").textContent="Di chuột qua điểm để xem số liệu; bấm điểm để lọc tháng.";loadGeneralExamReport()});
-const reportToday=new Date(),reportEnd=`${reportToday.getFullYear()}-${String(reportToday.getMonth()+1).padStart(2,"0")}-${String(reportToday.getDate()).padStart(2,"0")}`,reportStartDate=new Date(reportToday);reportStartDate.setFullYear(reportStartDate.getFullYear()-3);const reportStart=`${reportStartDate.getFullYear()}-${String(reportStartDate.getMonth()+1).padStart(2,"0")}-${String(reportStartDate.getDate()).padStart(2,"0")}`;document.getElementById("examFrom").value=reportStart;document.getElementById("examTo").value=reportEnd;loadGeneralExamReport();
+document.getElementById("examPeriod").addEventListener("change",async event=>{try{await applyExamPeriod(event.target.value)}catch(error){const status=document.getElementById("examReportStatus");status.textContent=`Không áp dụng được khoảng thời gian: ${error.message}`;status.style.display="block"}});
+document.getElementById("examFrom").addEventListener("change",()=>document.getElementById("examPeriod").value="custom");document.getElementById("examTo").addEventListener("change",()=>document.getElementById("examPeriod").value="custom");
+document.getElementById("examSchool").addEventListener("change",async()=>{try{await loadExamFilterOptions();document.getElementById("examPeriod").value="custom";document.getElementById("generalExamFilters").requestSubmit()}catch(error){const status=document.getElementById("examReportStatus");status.textContent=`Không tải được bộ lọc: ${error.message}`;status.style.display="block"}});
+document.getElementById("examGrade").addEventListener("change",()=>{const options=examFilterOptions?.classrooms||[],classroom=document.getElementById("examClassroom"),grade=document.getElementById("examGrade").value,school=document.getElementById("examSchool").value,classroomLabel=item=>{const duplicates=options.filter(other=>other.name===item.name&&(!school||String(other.school_id)===school)).length>1;return [item.name||`Lớp ${item.id}`,!school&&item.school_name,duplicates&&item.school_year_name,duplicates&&`#${item.id}`].filter(Boolean).join(" · ")};classroom.replaceChildren(new Option("Tất cả lớp",""));options.filter(item=>!grade||String(item.grade_id)===grade).forEach(item=>classroom.append(new Option(classroomLabel(item),item.id)));document.getElementById("generalExamFilters").requestSubmit()});
+document.getElementById("examClassroom").addEventListener("change",()=>document.getElementById("generalExamFilters").requestSubmit());
+const reportToday=new Date(),reportEnd=`${reportToday.getFullYear()}-${String(reportToday.getMonth()+1).padStart(2,"0")}-${String(reportToday.getDate()).padStart(2,"0")}`,reportStartDate=new Date(reportToday);reportStartDate.setFullYear(reportStartDate.getFullYear()-3);const reportStart=`${reportStartDate.getFullYear()}-${String(reportStartDate.getMonth()+1).padStart(2,"0")}-${String(reportStartDate.getDate()).padStart(2,"0")}`;document.getElementById("examFrom").value=reportStart;document.getElementById("examTo").value=reportEnd;loadExamFilterOptions().then(loadGeneralExamReport).catch(error=>{const status=document.getElementById("examReportStatus");status.textContent=`Không tải được bộ lọc: ${error.message}`;status.style.display="block"});
 </script></body></html>"""
 
 
@@ -1343,8 +1551,12 @@ button{font:inherit}.toolbar button{padding:10px 15px;border:0;border-radius:6px
 <article class="story"><h2>Mục tiêu nghiệp vụ</h2><p>{{ role.story }}</p></article>
 {% if role.enabled %}
  <form class="toolbar" id="filters">
+  <label>Phạm vi thời gian<select id="periodPreset"><option value="custom">Tùy chỉnh ngày</option><option value="week">Ngắn hạn · tuần gần nhất</option><option value="quarter">Trung hạn · quý hiện tại</option></select></label>
   <label>Từ ngày<input id="fromDate" type="date"></label><label>Đến ngày<input id="toDate" type="date"></label>
-  <label>Cơ sở<select id="school"><option value="">Tất cả cơ sở</option></select></label><button id="loadButton" type="submit">Lọc dữ liệu</button><button id="resetMonthButton" type="button" hidden>Quay lại khoảng ngày</button>
+  <label>Cơ sở<select id="school"><option value="">Tất cả cơ sở</option></select></label>
+  <label>Khối<select id="grade"><option value="">Tất cả khối</option></select></label>
+  <label>Lớp<select id="classroom"><option value="">Tất cả lớp</option></select></label>
+  <button id="loadButton" type="submit">Lọc dữ liệu</button><button id="resetMonthButton" type="button" hidden>Quay lại khoảng ngày</button>
  </form>
  <div id="status" class="status" role="alert"></div>
  <p class="notice"><b>Lưu ý bảo mật:</b> Chọn vai trò chỉ đổi màn hình và nhóm hồ sơ, không xác thực người xem hoặc giới hạn theo lớp/quan hệ giám hộ. Trang sẽ hiển thị tên học sinh và thông tin sức khỏe; cột liên hệ luôn là *** và không đọc từ cơ sở dữ liệu. Chỉ chạy cục bộ trên máy tin cậy; không mở ra mạng hoặc Internet.</p>
@@ -1367,7 +1579,25 @@ button{font:inherit}.toolbar button{padding:10px 15px;border:0;border-radius:6px
 <script>
 const API="/api/medical/dashboard",RECORDS_API="/api/medical/records",ROLE_KEY={{ role.key|tojson }},numberFormat=new Intl.NumberFormat("vi-VN"),svgNS="http://www.w3.org/2000/svg",metrics={{ role.metrics|tojson }},charts={{ role.charts|tojson }},palette={{ palette|tojson }};
 let currentData=null,recordsOffset=0,rangeBeforeMonthDrilldown=null,monthDrilldownSubmit=false;
+let roleFilterOptions=null;
 function setMetric(id,value){const element=document.getElementById(id);if(element)element.textContent=value===null||value===undefined?"—":numberFormat.format(value)}
+async function loadRoleFilterOptions(){
+ const school=document.getElementById("school"),grade=document.getElementById("grade"),classroom=document.getElementById("classroom"),oldGrade=grade.value,oldClass=classroom.value;
+ const response=await fetch(`/api/medical/filter-options?${new URLSearchParams({school_id:school.value})}`,{cache:"no-store"}),options=await response.json();if(!response.ok)throw new Error(options.error||"Không tải được bộ lọc lớp học.");
+ if(!school.dataset.loaded){options.schools.forEach(item=>school.append(new Option(item.name||`Cơ sở ${item.id}`,item.id)));school.dataset.loaded="true"}
+ const label=(item,name)=>school.value?name:`${name} · ${item.school_name}`;
+ const classroomLabel=item=>{const duplicates=options.classrooms.filter(other=>other.name===item.name&&(!school.value||String(other.school_id)===school.value)).length>1;return [item.name||`Lớp ${item.id}`,!school.value&&item.school_name,duplicates&&item.school_year_name,duplicates&&`#${item.id}`].filter(Boolean).join(" · ")};
+ grade.replaceChildren(new Option("Tất cả khối",""));options.grades.forEach(item=>grade.append(new Option(label(item,item.name||`Khối ${item.id}`),item.id)));grade.value=options.grades.some(item=>String(item.id)===oldGrade)?oldGrade:"";
+ classroom.replaceChildren(new Option("Tất cả lớp",""));options.classrooms.filter(item=>!grade.value||String(item.grade_id)===grade.value).forEach(item=>classroom.append(new Option(classroomLabel(item),item.id)));classroom.value=options.classrooms.some(item=>String(item.id)===oldClass&&(!grade.value||String(item.grade_id)===grade.value))?oldClass:"";
+ roleFilterOptions=options;const period=document.getElementById("periodPreset");period.querySelectorAll("optgroup").forEach(group=>group.remove());const terms=document.createElement("optgroup");terms.label="Trung hạn · theo kỳ học";options.terms.forEach(item=>terms.append(new Option(item.label,`term:${item.id}`)));if(options.terms.length)period.append(terms);const years=document.createElement("optgroup");years.label="Dài hạn · theo năm học";options.school_years.forEach(item=>years.append(new Option(item.label,`year:${item.id}`)));if(options.school_years.length)period.append(years)
+}
+async function applyRolePeriod(value){
+ const dateString=value=>`${value.getFullYear()}-${String(value.getMonth()+1).padStart(2,"0")}-${String(value.getDate()).padStart(2,"0")}`,today=new Date();let from,to;
+ if(value==="week"){const start=new Date(today);start.setDate(today.getDate()-6);from=dateString(start);to=dateString(today)}
+ else if(value==="quarter"){const quarterStart=Math.floor(today.getMonth()/3)*3;from=dateString(new Date(today.getFullYear(),quarterStart,1));to=dateString(new Date(today.getFullYear(),quarterStart+3,0))}
+ else if(value.startsWith("term:")||value.startsWith("year:")){const [kind,id]=value.split(":"),rows=kind==="term"?roleFilterOptions?.terms:roleFilterOptions?.school_years,range=rows?.find(item=>String(item.id)===id);if(range){if(document.getElementById("school").value!==String(range.school_id)){document.getElementById("school").value=range.school_id;await loadRoleFilterOptions()}from=range.from;to=range.to}}
+ if(from&&to){document.getElementById("fromDate").value=from;document.getElementById("toDate").value=to;document.getElementById("filters").requestSubmit()}
+}
 function drawChart(targetId,chart,color){
  const {category,type}=chart,target=document.getElementById(targetId);target.replaceChildren();const rows=(currentData.series||[]).filter(row=>row.category===category);
  if(!rows.length){const empty=document.createElement("p");empty.className="muted";empty.textContent="Không có dữ liệu trong khoảng lọc.";target.appendChild(empty);return}
@@ -1375,7 +1605,7 @@ function drawChart(targetId,chart,color){
  svg.setAttribute("viewBox",`0 0 ${W} ${H}`);svg.setAttribute("role","img");svg.setAttribute("aria-label",`${category} theo tháng, dạng ${type}`);target.appendChild(svg);
  for(let n=0;n<=3;n++){const y=T+ph*n/3,line=document.createElementNS(svgNS,"line");line.setAttribute("x1",L);line.setAttribute("x2",W-R);line.setAttribute("y1",y);line.setAttribute("y2",y);line.setAttribute("stroke","#e8edf4");svg.appendChild(line);const label=document.createElementNS(svgNS,"text");label.setAttribute("x",L-6);label.setAttribute("y",y+4);label.setAttribute("text-anchor","end");label.setAttribute("fill","#64748b");label.setAttribute("font-size","10");label.textContent=numberFormat.format(Math.round(max*(3-n)/3));svg.appendChild(label)}
  const points=rows.map((row,index)=>({row,value:Number(row.total)||0,x:L+index*slot+slot/2,y:T+ph-(Number(row.total)||0)/max*ph,month:String(row.period).slice(0,7)}));
- const selectMonth=month=>{if(!rangeBeforeMonthDrilldown){rangeBeforeMonthDrilldown={from:document.getElementById("fromDate").value,to:document.getElementById("toDate").value};document.getElementById("resetMonthButton").hidden=false}document.getElementById("fromDate").value=`${month}-01`;const lastDay=new Date(Number(month.slice(0,4)),Number(month.slice(5,7)),0).getDate();document.getElementById("toDate").value=`${month}-${String(lastDay).padStart(2,"0")}`;monthDrilldownSubmit=true;document.getElementById("filters").requestSubmit()};
+ const selectMonth=month=>{if(!rangeBeforeMonthDrilldown){rangeBeforeMonthDrilldown={from:document.getElementById("fromDate").value,to:document.getElementById("toDate").value};document.getElementById("resetMonthButton").hidden=false}document.getElementById("periodPreset").value="custom";document.getElementById("fromDate").value=`${month}-01`;const lastDay=new Date(Number(month.slice(0,4)),Number(month.slice(5,7)),0).getDate();document.getElementById("toDate").value=`${month}-${String(lastDay).padStart(2,"0")}`;monthDrilldownSubmit=true;document.getElementById("filters").requestSubmit()};
  if(type==="bar"){points.forEach(point=>{const width=Math.max(3,Math.min(28,slot*.64)),rect=document.createElementNS(svgNS,"rect");rect.setAttribute("x",point.x-width/2);rect.setAttribute("y",point.y);rect.setAttribute("width",width);rect.setAttribute("height",Math.max(1,T+ph-point.y));rect.setAttribute("rx",3);rect.setAttribute("fill",color);rect.setAttribute("data-clickable","true");rect.setAttribute("tabindex","0");rect.setAttribute("role","button");const title=document.createElementNS(svgNS,"title");title.textContent=`${point.month}: ${numberFormat.format(point.value)} · Bấm để lọc tháng`;rect.appendChild(title);rect.addEventListener("click",()=>selectMonth(point.month));rect.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();selectMonth(point.month)}});svg.appendChild(rect)})}
  else{const linePath=points.map((point,index)=>`${index?"L":"M"}${point.x},${point.y}`).join(" "),baseline=T+ph;if(type==="area"){const area=document.createElementNS(svgNS,"path");area.setAttribute("d",`${linePath} L${points[points.length-1].x},${baseline} L${points[0].x},${baseline} Z`);area.setAttribute("fill",color);area.setAttribute("fill-opacity",".16");svg.appendChild(area)}const line=document.createElementNS(svgNS,"path");line.setAttribute("d",linePath);line.setAttribute("fill","none");line.setAttribute("stroke",color);line.setAttribute("stroke-width","2.5");svg.appendChild(line);points.forEach(point=>{const dot=document.createElementNS(svgNS,"circle");dot.setAttribute("cx",point.x);dot.setAttribute("cy",point.y);dot.setAttribute("r",4);dot.setAttribute("fill",color);dot.setAttribute("data-clickable","true");dot.setAttribute("tabindex","0");dot.setAttribute("role","button");const title=document.createElementNS(svgNS,"title");title.textContent=`${point.month}: ${numberFormat.format(point.value)} · Bấm để lọc tháng`;dot.appendChild(title);dot.addEventListener("click",()=>selectMonth(point.month));dot.addEventListener("keydown",event=>{if(event.key==="Enter"||event.key===" "){event.preventDefault();selectMonth(point.month)}});svg.appendChild(dot)})}
  points.forEach((point,index)=>{if(index%Math.max(1,Math.ceil(points.length/8))===0||index===points.length-1){const text=document.createElementNS(svgNS,"text");text.setAttribute("x",point.x);text.setAttribute("y",H-15);text.setAttribute("text-anchor","middle");text.setAttribute("fill","#475569");text.setAttribute("font-size","10");text.textContent=point.month;svg.appendChild(text)}});
@@ -1395,7 +1625,7 @@ function renderStudentRecords(records,append){
 }
 async function loadStudentRecords(event){
  if(event)event.preventDefault();const append=event?.currentTarget?.id==="recordsMoreButton",button=append?document.getElementById("recordsMoreButton"):document.getElementById("recordsLoadButton"),status=document.getElementById("recordsStatus");if(!append)recordsOffset=0;button.disabled=true;if(!append)button.textContent="Đang tải...";status.style.display="none";
- try{const params=new URLSearchParams({role:ROLE_KEY,from:document.getElementById("fromDate").value,to:document.getElementById("toDate").value,school_id:document.getElementById("school").value,q:document.getElementById("recordSearch").value,category:document.getElementById("recordCategory").value,limit:"200",offset:String(recordsOffset)});const response=await fetch(`${RECORDS_API}?${params}`,{cache:"no-store"}),data=await response.json();if(!response.ok)throw new Error(data.error||"Không tải được hồ sơ học sinh.");renderStudentRecords(data.records||[],append);recordsOffset+=data.records?.length||0;document.getElementById("recordsMoreButton").hidden=!data.has_more}
+ try{const params=new URLSearchParams({role:ROLE_KEY,from:document.getElementById("fromDate").value,to:document.getElementById("toDate").value,school_id:document.getElementById("school").value,grade_id:document.getElementById("grade").value,classroom_id:document.getElementById("classroom").value,q:document.getElementById("recordSearch").value,category:document.getElementById("recordCategory").value,limit:"200",offset:String(recordsOffset)});const response=await fetch(`${RECORDS_API}?${params}`,{cache:"no-store"}),data=await response.json();if(!response.ok)throw new Error(data.error||"Không tải được hồ sơ học sinh.");renderStudentRecords(data.records||[],append);recordsOffset+=data.records?.length||0;document.getElementById("recordsMoreButton").hidden=!data.has_more}
  catch(error){status.textContent=`Không tải được hồ sơ học sinh: ${error.message}`;status.style.display="block"}
  finally{button.disabled=false;if(!append)button.textContent="Tìm hồ sơ"}
 }
@@ -1410,7 +1640,7 @@ function renderData(data){
 }
 async function loadData(event){
  if(event)event.preventDefault();const button=document.getElementById("loadButton"),status=document.getElementById("status");button.disabled=true;button.textContent="Đang tải...";status.style.display="none";
- try{const params=new URLSearchParams({from:document.getElementById("fromDate").value,to:document.getElementById("toDate").value,school_id:document.getElementById("school").value});if(params.get("from")&&params.get("to")&&params.get("from")>params.get("to"))throw new Error("Ngày bắt đầu không được sau ngày kết thúc.");const response=await fetch(`${API}?${params}`),data=await response.json();if(!response.ok)throw new Error(data.error||"Không tải được số liệu y tế.");renderData(data);await loadStudentRecords()}
+ try{const params=new URLSearchParams({from:document.getElementById("fromDate").value,to:document.getElementById("toDate").value,school_id:document.getElementById("school").value,grade_id:document.getElementById("grade").value,classroom_id:document.getElementById("classroom").value});if(params.get("from")&&params.get("to")&&params.get("from")>params.get("to"))throw new Error("Ngày bắt đầu không được sau ngày kết thúc.");const response=await fetch(`${API}?${params}`),data=await response.json();if(!response.ok)throw new Error(data.error||"Không tải được số liệu y tế.");renderData(data);await loadStudentRecords()}
  catch(error){status.textContent=`Không tải được dữ liệu y tế: ${error.message}`;status.style.display="block"}
  finally{button.disabled=false;button.textContent="Lọc dữ liệu"}
 }
@@ -1418,9 +1648,15 @@ async function start(){
  const status=document.getElementById("status");try{
   const formatDate=value=>`${value.getFullYear()}-${String(value.getMonth()+1).padStart(2,"0")}-${String(value.getDate()).padStart(2,"0")}`,today=new Date(),end=formatDate(today),startDate=new Date(today);startDate.setFullYear(startDate.getFullYear()-3);const start=formatDate(startDate);
   document.getElementById("fromDate").value=start;document.getElementById("toDate").value=end;
-  const response=await fetch(`${API}?${new URLSearchParams({from:start,to:end})}`),data=await response.json();if(!response.ok)throw new Error(data.error||"Không tải được danh mục cơ sở.");
-  const select=document.getElementById("school");data.schools.forEach(item=>{const option=document.createElement("option");option.value=item.id;option.textContent=item.name||`Cơ sở ${item.id}`;select.appendChild(option)});
-  document.getElementById("filters").addEventListener("submit",event=>{if(!monthDrilldownSubmit){rangeBeforeMonthDrilldown=null;document.getElementById("resetMonthButton").hidden=true}monthDrilldownSubmit=false;loadData(event)});document.getElementById("resetMonthButton").addEventListener("click",()=>{if(!rangeBeforeMonthDrilldown)return;document.getElementById("fromDate").value=rangeBeforeMonthDrilldown.from;document.getElementById("toDate").value=rangeBeforeMonthDrilldown.to;rangeBeforeMonthDrilldown=null;document.getElementById("resetMonthButton").hidden=true;document.getElementById("filters").requestSubmit()});document.getElementById("recordFilters").addEventListener("submit",loadStudentRecords);document.getElementById("recordsMoreButton").addEventListener("click",loadStudentRecords);renderData(data);await loadStudentRecords();
+  await loadRoleFilterOptions();
+  document.getElementById("filters").addEventListener("submit",event=>{if(!monthDrilldownSubmit){rangeBeforeMonthDrilldown=null;document.getElementById("resetMonthButton").hidden=true}monthDrilldownSubmit=false;loadData(event)});
+  document.getElementById("resetMonthButton").addEventListener("click",()=>{if(!rangeBeforeMonthDrilldown)return;document.getElementById("fromDate").value=rangeBeforeMonthDrilldown.from;document.getElementById("toDate").value=rangeBeforeMonthDrilldown.to;rangeBeforeMonthDrilldown=null;document.getElementById("resetMonthButton").hidden=true;document.getElementById("filters").requestSubmit()});
+  document.getElementById("periodPreset").addEventListener("change",async event=>{try{await applyRolePeriod(event.target.value)}catch(error){status.textContent=`Không áp dụng được khoảng thời gian: ${error.message}`;status.style.display="block"}});
+  document.getElementById("fromDate").addEventListener("change",()=>document.getElementById("periodPreset").value="custom");document.getElementById("toDate").addEventListener("change",()=>document.getElementById("periodPreset").value="custom");
+  document.getElementById("school").addEventListener("change",async()=>{try{await loadRoleFilterOptions();document.getElementById("periodPreset").value="custom";document.getElementById("filters").requestSubmit()}catch(error){status.textContent=`Không tải được bộ lọc: ${error.message}`;status.style.display="block"}});
+  document.getElementById("grade").addEventListener("change",()=>{const grade=document.getElementById("grade").value,classroom=document.getElementById("classroom"),school=document.getElementById("school").value,options=roleFilterOptions.classrooms,classroomLabel=item=>{const duplicates=options.filter(other=>other.name===item.name&&(!school||String(other.school_id)===school)).length>1;return [item.name||`Lớp ${item.id}`,!school&&item.school_name,duplicates&&item.school_year_name,duplicates&&`#${item.id}`].filter(Boolean).join(" · ")};classroom.replaceChildren(new Option("Tất cả lớp",""));options.filter(item=>!grade||String(item.grade_id)===grade).forEach(item=>classroom.append(new Option(classroomLabel(item),item.id)));classroom.value="";document.getElementById("filters").requestSubmit()});
+  document.getElementById("classroom").addEventListener("change",()=>document.getElementById("filters").requestSubmit());
+  document.getElementById("recordFilters").addEventListener("submit",loadStudentRecords);document.getElementById("recordsMoreButton").addEventListener("click",loadStudentRecords);await loadData();
  }catch(error){status.textContent=`Không tải được dashboard: ${error.message}`;status.style.display="block"}
 }
 start();
