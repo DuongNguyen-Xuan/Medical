@@ -1,6 +1,6 @@
 # K12 School Health Dashboards
 
-Ứng dụng Flask gồm trang chọn 11 đối tượng, dashboard y tế tổng hợp theo vai trò và trình duyệt PostgreSQL dùng chung.
+Ứng dụng Flask gồm trang chọn 11 đối tượng, dashboard y tế tổng hợp và bảng hồ sơ chi tiết theo nhóm nghiệp vụ.
 
 ## Chạy ứng dụng
 
