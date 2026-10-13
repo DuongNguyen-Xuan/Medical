@@ -4,16 +4,46 @@ import csv
 import io
 import json
 import os
+import re
 from datetime import date, datetime, time
 from decimal import Decimal
 
 import psycopg
 from psycopg import sql
 from psycopg.types.json import Json, Jsonb
-from flask import Flask, Response, jsonify, render_template_string, request
+from flask import Flask, Response, jsonify, redirect, render_template_string, request
 
 
 app = Flask(__name__)
+
+RAW_DATABASE_ENDPOINTS = {
+    "list_tables",
+    "list_columns",
+    "get_table_info",
+    "get_row",
+    "insert_row",
+    "update_row",
+    "delete_row",
+    "table_data",
+    "powerbi_data",
+    "export_csv",
+}
+
+
+@app.before_request
+def block_unscoped_database_browser():
+    if request.endpoint in RAW_DATABASE_ENDPOINTS:
+        return jsonify({"error": "Trình duyệt dữ liệu thô đã bị khóa; hãy dùng dashboard y tế."}), 403
+    return None
+
+
+@app.after_request
+def prevent_medical_data_caching(response):
+    if request.path.startswith("/api/medical/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
 
 DB_CONFIG = {
     "host": os.getenv("PGHOST", "localhost"),
@@ -36,6 +66,14 @@ def json_value(value):
     if isinstance(value, (bytes, bytearray, memoryview)):
         return bytes(value).hex()
     return value
+
+
+def mask_contact_text(value):
+    if value is None:
+        return ""
+    text = str(value)
+    text = re.sub(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "***", text, flags=re.IGNORECASE)
+    return re.sub(r"(?<!\d)(?:\+?84|0)(?:[\s().-]*\d){8,10}(?!\d)", "***", text)
 
 
 def requested_table():
@@ -619,6 +657,203 @@ def medical_dashboard_data():
         return jsonify({"error": f"Không truy vấn được dữ liệu y tế: {exc}"}), 503
 
 
+@app.get("/api/medical/records")
+def medical_student_records():
+    role_key = request.args.get("role", "").strip()
+    categories = MEDICAL_RECORD_CATEGORIES_BY_ROLE.get(role_key)
+    if categories is None:
+        return jsonify({"error": "Không tìm thấy dashboard cho đối tượng này."}), 404
+
+    try:
+        start_value = request.args.get("from", "").strip()
+        end_value = request.args.get("to", "").strip()
+        school_value = request.args.get("school_id", "").strip()
+        start_date = date.fromisoformat(start_value) if start_value else None
+        end_date = date.fromisoformat(end_value) if end_value else None
+        school_id = int(school_value) if school_value else None
+        limit = min(max(int(request.args.get("limit", "100")), 1), 200)
+        offset = min(max(int(request.args.get("offset", "0")), 0), 10000)
+        search = request.args.get("q", "").strip().casefold()[:100]
+        category_filter = request.args.get("category", "").strip()
+        if school_id is not None and school_id < 1:
+            raise ValueError("school_id phải là số nguyên dương.")
+        if start_date and end_date and start_date > end_date:
+            raise ValueError("Ngày bắt đầu không được sau ngày kết thúc.")
+        if category_filter and category_filter not in categories:
+            raise ValueError("Loại hồ sơ không phù hợp với dashboard.")
+    except ValueError as exc:
+        return jsonify({"error": f"Tham số không hợp lệ: {exc}"}), 400
+
+    class_join = {
+        alias: f"""LEFT JOIN LATERAL (
+                       SELECT string_agg(DISTINCT c.name, ', ' ORDER BY c.name) AS classroom
+                       FROM public.classroom_student cs
+                       JOIN public.classroom c ON c.id = cs.classroom_id
+                                                   AND c.deleted_at IS NULL
+                       WHERE cs.student_id = u.id AND cs.deleted_at IS NULL
+                         AND c.school_id = {alias}.school_id
+                   ) cl ON TRUE"""
+        for alias in ("q", "e", "b", "r", "m")
+    }
+    queries = {
+        "health": [
+            ("""SELECT h.created_at AS record_date, u.full_name AS student_name,
+                       COALESCE(c.name, cl.classroom, '') AS classroom, 'Hồ sơ sức khỏe' AS record_type,
+                       COALESCE(h.di_ung, '') AS symptoms,
+                       COALESCE(h.current_disease, h.medical_history, '') AS diagnosis,
+                       concat_ws(' · ',
+                           NULLIF(h.medical_history, ''),
+                           CASE WHEN h.chieu_cao IS NOT NULL THEN 'Chiều cao: ' || h.chieu_cao::text END,
+                           CASE WHEN h.can_nang IS NOT NULL THEN 'Cân nặng: ' || h.can_nang::text END,
+                           NULLIF(h.nhom_mau, ''), NULLIF(h.vaccination, ''), NULLIF(h.note, '')) AS details,
+                       '***' AS contact
+                FROM public.medical_student_health_records h
+                JOIN public.users u ON u.id = h.user_id AND u.deleted_at IS NULL
+                LEFT JOIN public.classroom c ON c.id = h.classroom_id AND c.deleted_at IS NULL
+                LEFT JOIN LATERAL (
+                    SELECT string_agg(DISTINCT cr.name, ', ' ORDER BY cr.name) AS classroom
+                    FROM public.classroom_student cs
+                    JOIN public.classroom cr ON cr.id = cs.classroom_id AND cr.deleted_at IS NULL
+                    WHERE cs.student_id = u.id AND cs.deleted_at IS NULL
+                      AND cr.school_id = h.school_id
+                ) cl ON TRUE
+                WHERE h.deleted_at IS NULL
+                  AND (%s::integer IS NULL OR h.school_id = %s)
+                  AND (%s::date IS NULL OR h.created_at::date >= %s)
+                  AND (%s::date IS NULL OR h.created_at::date <= %s)
+                ORDER BY h.created_at DESC NULLS LAST LIMIT 500""",),
+            ("""SELECT q.day AS record_date, u.full_name AS student_name,
+                       COALESCE(cl.classroom, '') AS classroom, 'Khám nhanh' AS record_type,
+                       COALESCE(q.symptom, '') AS symptoms, COALESCE(q.diagnostic, '') AS diagnosis,
+                       concat_ws(' · ', NULLIF(q.description, ''), NULLIF(q.consultation, ''),
+                                 NULLIF(q.treatments, ''), NULLIF(q.disease_group, '')) AS details,
+                       '***' AS contact
+                FROM public.medical_quick_examinations q
+                JOIN public.users u ON u.id = q.user_id AND u.deleted_at IS NULL
+                {class_join}
+                WHERE q.deleted_at IS NULL
+                  AND (%s::integer IS NULL OR q.school_id = %s)
+                  AND (%s::date IS NULL OR q.day::date >= %s)
+                  AND (%s::date IS NULL OR q.day::date <= %s)
+                ORDER BY q.day DESC NULLS LAST LIMIT 500""".format(class_join=class_join["q"]),),
+            ("""SELECT e.examination_date AS record_date, u.full_name AS student_name,
+                       COALESCE(cl.classroom, '') AS classroom, 'Khám định kỳ' AS record_type,
+                       COALESCE(e.kham_lam_sang, '') AS symptoms,
+                       concat_ws(' · ', NULLIF(e.tong_hop_benh_ly, ''), NULLIF(e.cac_benh_ve_mat, ''),
+                                 NULLIF(e.cac_benh_tai_mui_hong, ''), NULLIF(e.co_xuong_khop, ''),
+                                 NULLIF(e.da_lieu, ''), NULLIF(e.rang_ham_mat, ''),
+                                 NULLIF(e.ho_hap, ''), NULLIF(e.tieu_hoa, ''),
+                                 NULLIF(e.than_tiet_nieu, ''), NULLIF(e.than_kinh_tam_than, '')) AS diagnosis,
+                       concat_ws(' · ',
+                           CASE WHEN e.height IS NOT NULL THEN 'Chiều cao: ' || e.height::text END,
+                           CASE WHEN e.weight IS NOT NULL THEN 'Cân nặng: ' || e.weight::text END,
+                           CASE WHEN e.bmi IS NOT NULL THEN 'BMI: ' || e.bmi::text END,
+                           CASE WHEN e.huyet_ap IS NOT NULL THEN 'Huyết áp: ' || e.huyet_ap END,
+                           CASE WHEN e.nhip_tim IS NOT NULL THEN 'Nhịp tim: ' || e.nhip_tim::text END,
+                           NULLIF(e.tu_van_suc_khoe, '')) AS details,
+                       '***' AS contact
+                FROM public.medical_examination_generals e
+                JOIN public.users u ON u.id = e.user_id AND u.deleted_at IS NULL
+                {class_join}
+                WHERE e.deleted_at IS NULL
+                  AND (%s::integer IS NULL OR e.school_id = %s)
+                  AND (%s::date IS NULL OR e.examination_date::date >= %s)
+                  AND (%s::date IS NULL OR e.examination_date::date <= %s)
+                ORDER BY e.examination_date DESC NULLS LAST LIMIT 500""".format(class_join=class_join["e"]),),
+        ],
+        "insurance": [
+            ("""SELECT COALESCE(b.ngay_hieu_luc, b.created_at) AS record_date,
+                       u.full_name AS student_name, COALESCE(cl.classroom, '') AS classroom,
+                       'BHYT' AS record_type, '' AS symptoms, '' AS diagnosis,
+                       concat_ws(' · ', 'Mã BHYT: ' || NULLIF(b.ma_bao_hiem, ''),
+                                 'Ngày hết hạn: ' || b.ngay_het_han::date::text,
+                                 'Nơi đăng ký: ' || NULLIF(b.noi_dang_ky_kcbbd, '')) AS details,
+                       '***' AS contact
+                FROM public.medical_manager_bhyts b
+                JOIN public.users u ON u.id = b.user_id AND u.deleted_at IS NULL
+                {class_join}
+                WHERE b.deleted_at IS NULL
+                  AND (%s::integer IS NULL OR b.school_id = %s)
+                  AND (%s::date IS NULL OR COALESCE(b.ngay_hieu_luc, b.created_at)::date >= %s)
+                  AND (%s::date IS NULL OR COALESCE(b.ngay_hieu_luc, b.created_at)::date <= %s)
+                ORDER BY COALESCE(b.ngay_hieu_luc, b.created_at) DESC NULLS LAST LIMIT 500""".format(class_join=class_join["b"]),),
+        ],
+        "vaccination": [
+            ("""SELECT v.date AS record_date, u.full_name AS student_name,
+                       COALESCE(cl.classroom, '') AS classroom, 'Tiêm chủng' AS record_type,
+                       '' AS symptoms, '' AS diagnosis,
+                       concat_ws(' · ', NULLIF(v.name, ''), NULLIF(v.vaccine_name, ''),
+                                 'Mũi: ' || NULLIF(r.shot::text, ''), NULLIF(r.note, '')) AS details,
+                       '***' AS contact
+                FROM public.medical_vaccination_records r
+                JOIN public.medical_vaccination_events v
+                  ON v.id = r.medical_vaccination_event_id AND v.deleted_at IS NULL
+                JOIN public.users u ON u.id = r.user_id AND u.deleted_at IS NULL
+                {class_join}
+                WHERE r.deleted_at IS NULL
+                  AND (%s::integer IS NULL OR r.school_id = %s)
+                  AND (%s::date IS NULL OR v.date::date >= %s)
+                  AND (%s::date IS NULL OR v.date::date <= %s)
+                ORDER BY v.date DESC NULLS LAST LIMIT 500""".format(class_join=class_join["r"]),),
+        ],
+        "medicine": [
+            ("""SELECT COALESCE(d.start_date, m.created_at) AS record_date,
+                       u.full_name AS student_name, COALESCE(cl.classroom, '') AS classroom,
+                       'Quản lý thuốc' AS record_type, '' AS symptoms, '' AS diagnosis,
+                       concat_ws(' · ', NULLIF(d.medicine_name, ''), NULLIF(d.dosage, ''),
+                                 NULLIF(d.usage, ''), NULLIF(d.use_at_time, ''),
+                                 CASE WHEN d.end_date IS NOT NULL THEN 'Đến: ' || d.end_date::date::text END) AS details,
+                       '***' AS contact
+                FROM public.medical_coach_medicines m
+                JOIN public.users u ON u.id = m.user_id AND u.deleted_at IS NULL
+                LEFT JOIN public.medical_coach_medicine_details d
+                  ON d.medical_coach_medicine_id = m.id AND d.deleted_at IS NULL
+                {class_join}
+                WHERE m.deleted_at IS NULL
+                  AND (%s::integer IS NULL OR m.school_id = %s)
+                  AND (%s::date IS NULL OR COALESCE(d.start_date, m.created_at)::date >= %s)
+                  AND (%s::date IS NULL OR COALESCE(d.start_date, m.created_at)::date <= %s)
+                ORDER BY COALESCE(d.start_date, m.created_at) DESC NULLS LAST LIMIT 500""".format(class_join=class_join["m"]),),
+        ],
+    }
+
+    selected_categories = (category_filter,) if category_filter else categories
+    params = (school_id, school_id, start_date, start_date, end_date, end_date)
+    try:
+        with connect_db() as conn:
+            records = []
+            for category in selected_categories:
+                for (query,) in queries[category]:
+                    rows = conn.execute(query, params).fetchall()
+                    records.extend({
+                        "record_date": json_value(row[0]),
+                        "student_name": row[1],
+                        "classroom": row[2],
+                        "record_type": row[3],
+                        "symptoms": mask_contact_text(row[4]),
+                        "diagnosis": mask_contact_text(row[5]),
+                        "details": mask_contact_text(row[6]),
+                        "contact": "***",
+                    } for row in rows)
+
+        if search:
+            records = [
+                row for row in records
+                if search in " ".join(str(value or "") for key, value in row.items() if key != "contact").casefold()
+            ]
+        records.sort(key=lambda row: row["record_date"] or "", reverse=True)
+        return jsonify({
+            "role": role_key,
+            "categories": list(categories),
+            "limit": limit,
+            "offset": offset,
+            "has_more": len(records) > offset + limit,
+            "records": records[offset:offset + limit],
+        })
+    except psycopg.Error as exc:
+        return jsonify({"error": f"Không truy vấn được hồ sơ y tế: {exc}"}), 503
+
+
 @app.get("/dashboard/<role_key>")
 def medical_role_dashboard(role_key):
     role = MEDICAL_ROLES_BY_KEY.get(role_key)
@@ -689,7 +924,7 @@ search.addEventListener('input',()=>{clearTimeout(timer);timer=setTimeout(loadTa
 
 @app.get("/")
 def home():
-    return render_template_string(PAGE)
+    return redirect("/dashboard")
 
 
 MEDICAL_ROLES = [
@@ -859,6 +1094,30 @@ MEDICAL_ROLES = [
     },
 ]
 MEDICAL_ROLES_BY_KEY = {role["key"]: role for role in MEDICAL_ROLES}
+MEDICAL_RECORD_CATEGORIES_BY_ROLE = {
+    "ban-giam-hieu": ("health", "insurance", "vaccination", "medicine"),
+    "truong-bo-phan-y-te": ("health", "insurance", "vaccination", "medicine"),
+    "nhan-vien-y-te": ("health",),
+    "bac-si-don-vi-kham": ("health",),
+    "phu-trach-bhyt": ("insurance",),
+    "dieu-phoi-tiem-chung": ("vaccination",),
+    "quan-ly-thuoc": ("medicine",),
+    "giao-vien-chu-nhiem": ("health",),
+    "phu-huynh": ("health",),
+    "hoc-sinh": ("health",),
+    "cong-tac-hoc-sinh": ("health",),
+}
+MEDICAL_RECORD_CATEGORY_LABELS = {
+    "health": "Khám và hồ sơ sức khỏe",
+    "insurance": "Bảo hiểm y tế",
+    "vaccination": "Tiêm chủng",
+    "medicine": "Quản lý thuốc",
+}
+for role in MEDICAL_ROLES:
+    role["record_categories"] = [
+        {"key": key, "label": MEDICAL_RECORD_CATEGORY_LABELS[key]}
+        for key in MEDICAL_RECORD_CATEGORIES_BY_ROLE[role["key"]]
+    ]
 MEDICAL_PALETTE = {
     "Khám nhanh": "#2563eb",
     "Khám định kỳ": "#0f766e",
@@ -908,6 +1167,7 @@ button{font:inherit}.toolbar button{padding:10px 15px;border:0;border-radius:6px
 .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.panel,.story,.locked{padding:16px;margin-bottom:14px;min-width:0}.panel h2,.story h2{font-size:17px;margin:0 0 7px}.panel>p,.story p{margin:0;color:#475569;line-height:1.6}
 .chart svg{display:block;width:100%;height:auto;min-height:190px}.chart svg [data-clickable="true"]{cursor:pointer}.chart svg [data-clickable="true"]:hover{filter:brightness(.88)}
 .data-table{overflow:hidden}.table-scroll{overflow-x:auto;margin-top:10px}table{width:100%;border-collapse:collapse;font-size:13px;text-align:left}th,td{padding:9px 11px;border-bottom:1px solid #e2e8f0;white-space:nowrap}th{background:#f8fafc;color:#334155}td:last-child,th:last-child{text-align:right}
+.records-toolbar{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin:12px 0}.records-toolbar label{font-size:13px;font-weight:600;color:#475569}.records-toolbar input,.records-toolbar select{display:block;margin-top:5px;padding:9px 10px;min-width:180px;border:1px solid #cbd5e1;border-radius:7px;font:inherit;background:white}.records-toolbar button{padding:10px 15px;border:0;border-radius:6px;background:#15803d;color:white;cursor:pointer}.record-table{min-width:1000px}.record-table td:nth-child(1){font-weight:600}
 .notice{padding:13px 15px;margin:0 0 16px;border-left:4px solid #d97706;background:#fffbeb;color:#713f12;border-radius:5px;font-size:13px;line-height:1.55}
 .locked{border-color:#f4d5a6;background:#fffbeb}.locked h2{margin:0 0 8px;color:#92400e;font-size:17px}.locked p{margin:0;line-height:1.55}
 .muted{color:#64748b;font-size:12px}footer{padding:8px 0 28px;color:#64748b;font-size:12px;line-height:1.5}
@@ -923,12 +1183,16 @@ button{font:inherit}.toolbar button{padding:10px 15px;border:0;border-radius:6px
   <label>Cơ sở<select id="school"><option value="">Tất cả cơ sở</option></select></label><button id="loadButton" type="submit">Lọc dữ liệu</button>
  </form>
  <div id="status" class="status" role="alert"></div>
- <p class="notice"><b>Lưu ý bảo mật:</b> Trang này hiển thị số liệu tổng hợp toàn trường, chưa giới hạn theo tài khoản, lớp hoặc quan hệ giám hộ. Không trả tên học sinh, triệu chứng, chẩn đoán hoặc thông tin liên hệ. Dữ liệu sức khỏe là dữ liệu nhạy cảm; chỉ chạy cục bộ và không dùng số liệu này thay cho tư vấn y tế chuyên môn.</p>
+ <p class="notice"><b>Lưu ý bảo mật:</b> Chọn vai trò chỉ đổi màn hình và nhóm hồ sơ, không xác thực người xem hoặc giới hạn theo lớp/quan hệ giám hộ. Trang sẽ hiển thị tên học sinh và thông tin sức khỏe; cột liên hệ luôn là *** và không đọc từ cơ sở dữ liệu. Chỉ chạy cục bộ trên máy tin cậy; không mở ra mạng hoặc Internet.</p>
  <section class="cards" aria-label="Chỉ số theo vai trò"><div class="card"><span>Hồ sơ học sinh hiện có (tổng hợp)</span><strong id="studentProfiles">—</strong></div>{% for metric in role.metrics %}<div class="card"><span>{{ metric[1] }}</span><strong id="{{ metric[0] }}">—</strong></div>{% endfor %}</section>
  <section class="grid" aria-label="Biểu đồ theo vai trò">{% for chart in role.charts %}<div class="panel chart"><h2>{{ chart.category }} theo tháng</h2><p>Bấm điểm dữ liệu để lọc về tháng tương ứng. Dạng biểu đồ: {{ chart.type }}.</p><div id="chart-{{ loop.index0 }}"></div></div>{% endfor %}
  {% if role.key in ["ban-giam-hieu","truong-bo-phan-y-te","phu-trach-bhyt"] %}<div class="panel"><h2>Tổng hợp BHYT</h2><p id="bhytSummary">Đang tải...</p></div>{% endif %}
  {% if role.key in ["ban-giam-hieu","truong-bo-phan-y-te","cong-tac-hoc-sinh"] %}<div class="panel"><h2>Hồ sơ sức khỏe (tổng hợp)</h2><p id="healthSummary">Đang tải...</p></div>{% endif %}</section>
  <section class="panel data-table"><h2>Bảng dữ liệu tổng hợp theo tháng</h2><p class="muted">Chỉ gồm số lượt tổng hợp theo tháng và nhóm nghiệp vụ; không hiển thị hồ sơ cá nhân.</p><div id="seriesTable" class="table-scroll" aria-live="polite">Đang tải...</div></section>
+ <section class="panel data-table"><h2>Hồ sơ học sinh theo dashboard</h2><p class="muted">Hồ sơ được lọc theo loại, cơ sở, ngày và từ khóa. Thông tin liên hệ được che.</p>
+  <form class="records-toolbar" id="recordFilters"><label>Tìm học sinh / nội dung<input id="recordSearch" type="search" maxlength="100" placeholder="Tên, lớp, triệu chứng, chẩn đoán..."></label><label>Loại hồ sơ<select id="recordCategory"><option value="">Tất cả loại hồ sơ của vai trò</option>{% for category in role.record_categories %}<option value="{{ category.key }}">{{ category.label }}</option>{% endfor %}</select></label><button id="recordsLoadButton" type="submit">Tìm hồ sơ</button></form>
+  <div id="recordsStatus" class="status" role="alert"></div><div id="studentRecords" class="table-scroll" aria-live="polite">Đang tải hồ sơ...</div><button id="recordsMoreButton" type="button" hidden>Tải thêm hồ sơ</button>
+ </section>
  <footer>Bộ lọc thời gian áp dụng theo ngày khám/sự kiện hoặc ngày tạo hồ sơ tương ứng. Phân loại BHYT chỉ dựa trên ngày hết hạn, không thay thế trạng thái nghiệp vụ. Số lượt tiêm được tính từ bản ghi tiêm thực tế, không suy ra từ số sự kiện.</footer>
 {% else %}
  <section class="locked" role="status"><h2>Dashboard chưa mở quyền truy cập</h2><p>{{ role.access_note }}</p></section>
@@ -937,8 +1201,8 @@ button{font:inherit}.toolbar button{padding:10px 15px;border:0;border-radius:6px
 </main>
 {% if role.enabled %}
 <script>
-const API="/api/medical/dashboard",numberFormat=new Intl.NumberFormat("vi-VN"),svgNS="http://www.w3.org/2000/svg",metrics={{ role.metrics|tojson }},charts={{ role.charts|tojson }},palette={{ palette|tojson }};
-let currentData=null;
+const API="/api/medical/dashboard",RECORDS_API="/api/medical/records",ROLE_KEY={{ role.key|tojson }},numberFormat=new Intl.NumberFormat("vi-VN"),svgNS="http://www.w3.org/2000/svg",metrics={{ role.metrics|tojson }},charts={{ role.charts|tojson }},palette={{ palette|tojson }};
+let currentData=null,recordsOffset=0;
 function setMetric(id,value){const element=document.getElementById(id);if(element)element.textContent=value===null||value===undefined?"—":numberFormat.format(value)}
 function drawChart(targetId,chart,color){
  const {category,type}=chart,target=document.getElementById(targetId);target.replaceChildren();const rows=(currentData.series||[]).filter(row=>row.category===category);
@@ -957,6 +1221,20 @@ function renderSeriesTable(series){
  const table=document.createElement("table"),head=document.createElement("thead"),headRow=document.createElement("tr");["Tháng","Nhóm nghiệp vụ","Số lượt"].forEach(label=>{const cell=document.createElement("th");cell.textContent=label;headRow.appendChild(cell)});head.appendChild(headRow);table.appendChild(head);const body=document.createElement("tbody");
  [...series].reverse().forEach(row=>{const tr=document.createElement("tr");[String(row.period).slice(0,7),row.category,numberFormat.format(Number(row.total)||0)].forEach(value=>{const cell=document.createElement("td");cell.textContent=value;tr.appendChild(cell)});body.appendChild(tr)});table.appendChild(body);target.appendChild(table)
 }
+function renderStudentRecords(records,append){
+ const target=document.getElementById("studentRecords");if(!append)target.replaceChildren();
+ if(!records.length&&!append){const empty=document.createElement("p");empty.className="muted";empty.textContent="Không tìm thấy hồ sơ phù hợp với bộ lọc.";target.appendChild(empty);return}
+ let table=append?target.querySelector("table"):null;
+ if(!table){table=document.createElement("table");table.className="record-table";const head=document.createElement("thead"),headRow=document.createElement("tr");
+  ["Học sinh","Lớp","Ngày","Loại hồ sơ","Triệu chứng","Chẩn đoán / ghi nhận","Chi tiết","Liên hệ"].forEach(label=>{const cell=document.createElement("th");cell.textContent=label;headRow.appendChild(cell)});head.appendChild(headRow);table.appendChild(head);table.appendChild(document.createElement("tbody"));target.appendChild(table)}
+ const body=table.querySelector("tbody");records.forEach(record=>{const row=document.createElement("tr"),dateValue=record.record_date?new Date(record.record_date).toLocaleDateString("vi-VN"):"";[record.student_name,record.classroom,dateValue,record.record_type,record.symptoms,record.diagnosis,record.details,"***"].forEach(value=>{const cell=document.createElement("td");cell.textContent=value||"—";row.appendChild(cell)});body.appendChild(row)})
+}
+async function loadStudentRecords(event){
+ if(event)event.preventDefault();const append=event?.currentTarget?.id==="recordsMoreButton",button=append?document.getElementById("recordsMoreButton"):document.getElementById("recordsLoadButton"),status=document.getElementById("recordsStatus");if(!append)recordsOffset=0;button.disabled=true;if(!append)button.textContent="Đang tải...";status.style.display="none";
+ try{const params=new URLSearchParams({role:ROLE_KEY,from:document.getElementById("fromDate").value,to:document.getElementById("toDate").value,school_id:document.getElementById("school").value,q:document.getElementById("recordSearch").value,category:document.getElementById("recordCategory").value,limit:"200",offset:String(recordsOffset)});const response=await fetch(`${RECORDS_API}?${params}`,{cache:"no-store"}),data=await response.json();if(!response.ok)throw new Error(data.error||"Không tải được hồ sơ học sinh.");renderStudentRecords(data.records||[],append);recordsOffset+=data.records?.length||0;document.getElementById("recordsMoreButton").hidden=!data.has_more}
+ catch(error){status.textContent=`Không tải được hồ sơ học sinh: ${error.message}`;status.style.display="block"}
+ finally{button.disabled=false;if(!append)button.textContent="Tìm hồ sơ"}
+}
 function renderData(data){
  currentData=data;const values=data.metrics;
  setMetric("studentProfiles",values.student_profiles);
@@ -968,7 +1246,7 @@ function renderData(data){
 }
 async function loadData(event){
  if(event)event.preventDefault();const button=document.getElementById("loadButton"),status=document.getElementById("status");button.disabled=true;button.textContent="Đang tải...";status.style.display="none";
- try{const params=new URLSearchParams({from:document.getElementById("fromDate").value,to:document.getElementById("toDate").value,school_id:document.getElementById("school").value});if(params.get("from")&&params.get("to")&&params.get("from")>params.get("to"))throw new Error("Ngày bắt đầu không được sau ngày kết thúc.");const response=await fetch(`${API}?${params}`),data=await response.json();if(!response.ok)throw new Error(data.error||"Không tải được số liệu y tế.");renderData(data)}
+ try{const params=new URLSearchParams({from:document.getElementById("fromDate").value,to:document.getElementById("toDate").value,school_id:document.getElementById("school").value});if(params.get("from")&&params.get("to")&&params.get("from")>params.get("to"))throw new Error("Ngày bắt đầu không được sau ngày kết thúc.");const response=await fetch(`${API}?${params}`),data=await response.json();if(!response.ok)throw new Error(data.error||"Không tải được số liệu y tế.");renderData(data);await loadStudentRecords()}
  catch(error){status.textContent=`Không tải được dữ liệu y tế: ${error.message}`;status.style.display="block"}
  finally{button.disabled=false;button.textContent="Lọc dữ liệu"}
 }
@@ -978,7 +1256,7 @@ async function start(){
   document.getElementById("fromDate").value=start;document.getElementById("toDate").value=end;
   const response=await fetch(`${API}?${new URLSearchParams({from:start,to:end})}`),data=await response.json();if(!response.ok)throw new Error(data.error||"Không tải được danh mục cơ sở.");
   const select=document.getElementById("school");data.schools.forEach(item=>{const option=document.createElement("option");option.value=item.id;option.textContent=item.name||`Cơ sở ${item.id}`;select.appendChild(option)});
-  document.getElementById("filters").addEventListener("submit",loadData);renderData(data);
+  document.getElementById("filters").addEventListener("submit",loadData);document.getElementById("recordFilters").addEventListener("submit",loadStudentRecords);document.getElementById("recordsMoreButton").addEventListener("click",loadStudentRecords);renderData(data);await loadStudentRecords();
  }catch(error){status.textContent=`Không tải được dashboard: ${error.message}`;status.style.display="block"}
 }
 start();
@@ -988,4 +1266,4 @@ start();
 
 
 if __name__ == "__main__":
-    app.run(host=os.getenv("APP_HOST", "127.0.0.1"), port=int(os.getenv("APP_PORT", "5000")), debug=False)
+    app.run(host="127.0.0.1", port=int(os.getenv("APP_PORT", "5000")), debug=False)

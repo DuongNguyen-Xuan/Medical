@@ -35,22 +35,15 @@ Mở trang chọn đối tượng: <http://127.0.0.1:5000/dashboard>.
 | Học sinh | `/dashboard/hoc-sinh` |
 | Phòng công tác học sinh | `/dashboard/cong-tac-hoc-sinh` |
 
-Đã bật cả 11 trang ở chế độ số liệu tổng hợp toàn trường. Mỗi trang có mục tiêu nghiệp vụ, bộ chỉ số, bộ lọc cơ sở/thời gian, biểu đồ đường/cột/miền và bảng tổng hợp tháng. Dữ liệu chưa được giới hạn theo tài khoản, lớp, đơn vị khám hoặc quan hệ giám hộ; không có hồ sơ cá nhân. Các chỉ số trên dashboard dành cho phụ huynh, học sinh, giáo viên và đơn vị khám cũng là tổng hợp toàn trường, không phải dữ liệu riêng của đối tượng đó.
+Đã bật cả 11 trang với chỉ số tổng hợp và bảng hồ sơ chi tiết theo nhóm nghiệp vụ của từng dashboard. Bảng chi tiết gồm tên học sinh, lớp, ngày, triệu chứng, chẩn đoán/ghi nhận và nội dung khám/BHYT/tiêm chủng/thuốc tương ứng. Giá trị liên hệ luôn hiển thị `***`; ứng dụng không truy vấn trường điện thoại, email hoặc địa chỉ để điền vào bảng này.
 
 ## Dữ liệu và bảo mật
 
-Dashboard tổng hợp số hồ sơ học sinh hiện có (theo cơ sở, không phụ thuộc bộ lọc ngày), hồ sơ sức khỏe, khám nhanh, khám định kỳ, BHYT, sự kiện tiêm chủng và hồ sơ thuốc từ các bảng `medical_*`. API dashboard chỉ trả số liệu tổng hợp và chuỗi số lượt theo tháng; không trả tên học sinh, triệu chứng, chẩn đoán hoặc thông tin liên hệ. Bảng bên dưới biểu đồ sử dụng cùng bộ lọc và chỉ hiển thị tháng, nhóm nghiệp vụ, số lượt. Một số trường hợp chưa có dữ liệu nguồn (ví dụ bản ghi tiêm chủng) sẽ hiển thị 0; không suy ra tỷ lệ bao phủ nếu chưa có mẫu số học sinh đủ điều kiện.
+Dashboard tổng hợp dữ liệu từ `profile_student` và các bảng `medical_*`. Biểu đồ và bảng tháng là tổng hợp; bảng hồ sơ trả dữ liệu chi tiết theo phạm vi nghiệp vụ của dashboard. Hồ sơ chi tiết mặc định giới hạn thời gian ở ba năm gần nhất, có lọc theo ngày/cơ sở/loại hồ sơ/từ khóa và phân trang.
 
-Dữ liệu sức khỏe là dữ liệu nhạy cảm. Ứng dụng hiện chưa có xác thực người dùng, phân quyền hoặc nhật ký truy cập; chỉ chạy trên máy cục bộ, không đổi `APP_HOST` sang địa chỉ mạng và không dùng để cung cấp hồ sơ cá nhân. Dashboard phụ huynh/học sinh hiện chỉ là số liệu tổng hợp toàn trường, không phải cổng xem hồ sơ riêng. Chưa kết nối gửi thông báo phụ huynh, và chưa có luồng nhập/xuất Excel nghiệp vụ. Cần hoàn thiện các chức năng này cùng SSO và ma trận quyền trước khi triển khai thực tế.
+**Cảnh báo quan trọng:** dữ liệu sức khỏe là dữ liệu nhạy cảm. Chọn dashboard chỉ thay đổi giao diện và loại hồ sơ, không xác thực danh tính hay đảm bảo quyền theo lớp/quan hệ giám hộ; người truy cập cục bộ có thể chọn vai trò khác. Trình duyệt database, API dữ liệu thô, Power BI và xuất CSV đã bị khóa. Flask được cố định bind vào `127.0.0.1`; không đưa cổng này ra mạng, không dùng chung máy với người không được phép và không triển khai thực tế trước khi tích hợp SSO, phân quyền server-side và nhật ký truy cập. Chưa kết nối gửi thông báo phụ huynh hoặc luồng nhập/xuất Excel nghiệp vụ.
 
-## Trình duyệt PostgreSQL và API dùng chung
+## API dashboard
 
-Trang gốc <http://127.0.0.1:5000/> là công cụ quản trị cục bộ, cho phép tìm bảng, xem dữ liệu, sửa/xóa theo khóa chính và xuất CSV. Công cụ này có thể truy cập dữ liệu thô trong database và không có xác thực; không mở ra mạng hoặc Internet. Các API dùng chung:
-
-- `/api/tables?q=medical` — tìm bảng theo schema hoặc tên bảng.
-- `/api/columns?schema=public&table=medical_quick_examinations` — xem cấu trúc bảng.
-- `/api/data?schema=public&table=medical_quick_examinations&limit=100&offset=0` — xem dữ liệu JSON.
-- `/api/powerbi?schema=public&table=medical_quick_examinations&limit=100000&offset=0` — dữ liệu JSON cho Power BI Web connector.
 - `/api/medical/dashboard?from=2024-01-01&to=2026-12-31&school_id=3` — số liệu y tế tổng hợp theo ngày và cơ sở.
-- `/export.csv?schema=public&table=medical_quick_examinations` — xuất CSV.
-- `POST /api/rows`, `PUT /api/rows`, `DELETE /api/rows` — thao tác trên bảng PostgreSQL thường có thể ghi.
+- `/api/medical/records?role=nhan-vien-y-te&from=2024-01-01&to=2026-12-31` — hồ sơ theo nhóm nghiệp vụ của dashboard; `contact` được cố định là `***`.
